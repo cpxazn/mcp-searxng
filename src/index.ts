@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -10,14 +12,18 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 // Import modularized functionality
-import { WEB_SEARCH_TOOL, READ_URL_TOOL, LITE_WEB_SEARCH_TOOL, LITE_READ_URL_TOOL, isSearXNGWebSearchArgs } from "./types.js";
+import { WEB_SEARCH_TOOL, READ_URL_TOOL, isSearXNGWebSearchArgs } from "./types.js";
 import { logMessage, setLogLevel, getCurrentLogLevel } from "./logging.js";
 import { performWebSearch } from "./search.js";
 import { fetchAndConvertToMarkdown } from "./url-reader.js";
 import { createConfigResource, createHelpResource } from "./resources.js";
 import { createHttpServer, resolveBindHost } from "./http-server.js";
 
-import { packageVersion } from "./version.js";
+// Use a static version string that will be updated by the version script
+const packageVersion = "1.1.0";
+
+// Export the version for use in other modules
+export { packageVersion };
 
 // Type guard for URL reading args
 export function isWebUrlReadArgs(args: unknown): args is {
@@ -63,44 +69,6 @@ export function isWebUrlReadArgs(args: unknown): args is {
   return true;
 }
 
-function getFetchTimeoutMs(mcpServer: McpServer): number {
-  const rawValue = process.env.FETCH_TIMEOUT_MS;
-  if (rawValue === undefined || rawValue.trim() === "") {
-    return 10000;
-  }
-
-  const parsed = parseInt(rawValue, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) {
-    logMessage(
-      mcpServer,
-      "warning",
-      `Ignoring invalid FETCH_TIMEOUT_MS="${rawValue}". Expected a positive integer. Using default 10000.`,
-    );
-    return 10000;
-  }
-
-  return parsed;
-}
-
-function getDefaultUrlReadMaxChars(mcpServer: McpServer): number | undefined {
-  const rawValue = process.env.URL_READ_MAX_CHARS;
-  if (rawValue === undefined || rawValue.trim() === "") {
-    return undefined;
-  }
-
-  const parsed = parseInt(rawValue, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) {
-    logMessage(
-      mcpServer,
-      "warning",
-      `Ignoring invalid URL_READ_MAX_CHARS="${rawValue}". Expected a positive integer.`,
-    );
-    return undefined;
-  }
-
-  return parsed;
-}
-
 /**
  * Creates and configures a new McpServer with all handlers registered.
  * Called once per HTTP session, or once for STDIO mode.
@@ -122,15 +90,11 @@ export function createMcpServer(): McpServer {
 
   const server = mcpServer.server;
 
-  const useLiteTools = process.env.SEARXNG_LITE_TOOLS === "true";
-  const searchTool = useLiteTools ? LITE_WEB_SEARCH_TOOL : WEB_SEARCH_TOOL;
-  const readUrlTool = useLiteTools ? LITE_READ_URL_TOOL : READ_URL_TOOL;
-
   // List tools handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     logMessage(mcpServer, "debug", "Handling list_tools request");
     return {
-      tools: [searchTool, readUrlTool],
+      tools: [WEB_SEARCH_TOOL, READ_URL_TOOL],
     };
   });
 
@@ -152,9 +116,7 @@ export function createMcpServer(): McpServer {
           args.time_range,
           args.language,
           args.safesearch,
-          args.min_score,
-          args.num_results,
-          args.categories
+          args.min_score
         );
 
         return {
@@ -170,16 +132,15 @@ export function createMcpServer(): McpServer {
           throw new Error("Invalid arguments for URL reading");
         }
 
-        const defaultMaxLength = getDefaultUrlReadMaxChars(mcpServer);
         const paginationOptions = {
           startChar: args.startChar,
-          maxLength: args.maxLength ?? defaultMaxLength,
+          maxLength: args.maxLength,
           section: args.section,
           paragraphRange: args.paragraphRange,
           readHeadings: args.readHeadings,
         };
 
-        const result = await fetchAndConvertToMarkdown(mcpServer, args.url, getFetchTimeoutMs(mcpServer), paginationOptions);
+        const result = await fetchAndConvertToMarkdown(mcpServer, args.url, 10000, paginationOptions);
 
         return {
           content: [
@@ -275,7 +236,7 @@ export function createMcpServer(): McpServer {
 }
 
 // Main function
-export async function main() {
+async function main() {
   // Check for HTTP transport mode
   const httpPort = process.env.MCP_HTTP_PORT;
   if (httpPort) {
@@ -331,4 +292,25 @@ export async function main() {
     logMessage(mcpServer, "info", `Environment: ${process.env.NODE_ENV || 'development'}`);
     logMessage(mcpServer, "info", `SearXNG URL: ${process.env.SEARXNG_URL || 'not configured'}`);
   }
+}
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+// Start the server (CLI entrypoint) — only when run directly, not when imported
+import { fileURLToPath } from 'node:url';
+const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMainModule) {
+  main().catch((error) => {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  });
 }
