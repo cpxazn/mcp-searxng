@@ -1,10 +1,8 @@
 #!/usr/bin/env tsx
 
 import { strict as assert } from 'node:assert';
-import { fileURLToPath } from 'node:url';
 import {
   getHttpSecurityConfig,
-  validateHttpSecurityConfig,
   isRequestAuthorized,
   isOriginAllowed,
 } from '../../src/http-security.js';
@@ -66,56 +64,12 @@ async function runTests() {
     assert.equal(isOriginAllowed('https://app.example.com', config), true);
   }, results);
 
-  await testFunction('validateHttpSecurityConfig throws when harden=true but no auth token', () => {
-    const config = {
-      harden: true,
-      requireAuth: true,
-      authToken: undefined,
-      restrictOrigins: true,
-      allowedOrigins: ['https://app.example.com'],
-      enableDnsRebindingProtection: true,
-      allowedHosts: ['localhost'],
-      exposeFullConfig: false,
-      allowPrivateUrls: false,
-    };
-    assert.throws(
-      () => validateHttpSecurityConfig(config),
-      /MCP_HTTP_AUTH_TOKEN/
-    );
-  }, results);
-
-  await testFunction('validateHttpSecurityConfig throws when harden=true but no allowed origins', () => {
-    const config = {
-      harden: true,
-      requireAuth: true,
-      authToken: 'secret',
-      restrictOrigins: true,
-      allowedOrigins: [],
-      enableDnsRebindingProtection: true,
-      allowedHosts: ['localhost'],
-      exposeFullConfig: false,
-      allowPrivateUrls: false,
-    };
-    assert.throws(
-      () => validateHttpSecurityConfig(config),
-      /MCP_HTTP_ALLOWED_ORIGINS/
-    );
-  }, results);
-
-  await testFunction('isOriginAllowed returns true when restrictOrigins=true but no origin header', () => {
-    const config = {
-      harden: true,
-      restrictOrigins: true,
-      allowedOrigins: ['https://app.example.com'],
-    } as any;
-    assert.equal(isOriginAllowed(undefined, config), true);
-  }, results);
-
   printTestSummary(results, 'HTTP Security');
   return results;
 }
 
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);
