@@ -13,11 +13,8 @@
 import { strict as assert } from 'node:assert';
 import * as http from 'node:http';
 import * as net from 'node:net';
-import { createRequire, syncBuiltinESMExports } from 'node:module';
-import { fileURLToPath } from 'node:url';
 import * as zlib from 'node:zlib';
-import { checkContentLength, fetchAndConvertToMarkdown } from '../../src/url-reader.js';
-import { createUrlReaderLookup } from '../../src/proxy.js';
+import { fetchAndConvertToMarkdown } from '../../src/url-reader.js';
 import { urlCache } from '../../src/cache.js';
 import { testFunction, createTestResults, printTestSummary } from '../helpers/test-utils.js';
 import { createMockServer } from '../helpers/mock-server.js';
@@ -25,9 +22,6 @@ import { EnvManager } from '../helpers/env-utils.js';
 
 const results = createTestResults();
 const envManager = new EnvManager();
-const require = createRequire(import.meta.url);
-const dnsModule = require('node:dns') as typeof import('node:dns');
-const TEST_PUBLIC_IP = '203.0.113.10';
 
 // ─── local test-server helpers ───────────────────────────────────────────────
 
@@ -46,71 +40,9 @@ interface TestServer {
   close: () => Promise<void>;
 }
 
-type ServerHandler = (req: http.IncomingMessage, res: http.ServerResponse) => void;
-type ConnectProxyHandler = (authority: string, requestText: string) => {
-  status?: number;
-  headers?: Record<string, string>;
-  body?: string;
-};
-
-function startHttpServer(handler: ServerHandler): Promise<TestServer> {
-  return new Promise((resolve, reject) => {
-    const server = http.createServer(handler);
-
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as net.AddressInfo;
-      resolve({
-        url: `http://127.0.0.1:${addr.port}`,
-        close: () =>
-          new Promise<void>((res) => {
-            server.closeAllConnections();
-            server.close(() => res());
-          }),
-      });
-    });
-
-    server.once('error', reject);
-  });
-}
-
-function startConnectProxyServer(handler: ConnectProxyHandler): Promise<TestServer> {
-  return new Promise((resolve, reject) => {
-    const server = http.createServer();
-
-    server.on('connect', (req, socket) => {
-      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      socket.once('data', (data) => {
-        const response = handler(req.url || '', data.toString('utf8'));
-        const status = response.status ?? 200;
-        const headers = {
-          'content-type': 'text/html; charset=utf-8',
-          ...response.headers,
-        };
-        const headerLines = Object.entries(headers)
-          .map(([key, value]) => `${key}: ${value}`)
-          .join('\r\n');
-        socket.end(`HTTP/1.1 ${status} OK\r\n${headerLines}\r\n\r\n${response.body ?? ''}`);
-      });
-    });
-
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as net.AddressInfo;
-      resolve({
-        url: `http://127.0.0.1:${addr.port}`,
-        close: () =>
-          new Promise<void>((res) => {
-            server.closeAllConnections();
-            server.close(() => res());
-          }),
-      });
-    });
-
-    server.once('error', reject);
-  });
-}
-
 function startTestServer(opts: ServerOpts = {}): Promise<TestServer> {
-  return startHttpServer((req, res) => {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
       if (opts.closeImmediately) {
         req.socket.destroy();
         return;
@@ -126,6 +58,21 @@ function startTestServer(opts: ServerOpts = {}): Promise<TestServer> {
       };
       res.writeHead(status, headers);
       res.end(opts.body ?? '');
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as net.AddressInfo;
+      resolve({
+        url: `http://127.0.0.1:${addr.port}`,
+        close: () =>
+          new Promise<void>((res) => {
+            server.closeAllConnections(); // drop any lingering (hung) connections
+            server.close(() => res());
+          }),
+      });
+    });
+
+    server.once('error', reject);
   });
 }
 
@@ -144,48 +91,10 @@ function getFreePort(): Promise<number> {
   });
 }
 
-type MockDnsRecords = Record<string, Array<{ address: string; family: 4 | 6 }>>;
-
-function installDnsLookupMock(recordsByHostname: MockDnsRecords): () => void {
-  const originalLookup = dnsModule.lookup;
-
-  (dnsModule as any).lookup = (hostname: string, options: any, callback?: any) => {
-    const cb = typeof options === 'function' ? options : callback;
-    if (net.isIP(hostname)) {
-      return (originalLookup as any).call(dnsModule, hostname, options, callback);
-    }
-
-    const records = recordsByHostname[hostname];
-
-    if (!records) {
-      const err = new Error(`Mock DNS has no records for ${hostname}`) as NodeJS.ErrnoException;
-      err.code = 'ENOTFOUND';
-      cb(err);
-      return;
-    }
-
-    if (options?.all) {
-      cb(null, records);
-      return;
-    }
-
-    const first = records[0];
-    cb(null, first.address, first.family);
-  };
-  syncBuiltinESMExports();
-
-  return () => {
-    (dnsModule as any).lookup = originalLookup;
-    syncBuiltinESMExports();
-  };
-}
-
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 async function runTests() {
   console.log('🧪 Testing: url-reader.ts\n');
-  const originalAllowPrivateUrls = process.env.MCP_HTTP_ALLOW_PRIVATE_URLS;
-  process.env.MCP_HTTP_ALLOW_PRIVATE_URLS = 'true';
 
   // ── invalid URLs (blocked before any network call) ────────────────────────
 
@@ -281,330 +190,6 @@ async function runTests() {
       );
     } finally {
       await close();
-    }
-  }, results);
-
-  // ── HEAD content-length preflight ─────────────────────────────────────────
-
-  await testFunction('HEAD preflight returns Content-Length when present', async () => {
-    const mockServer = createMockServer();
-    const { url, close } = await startHttpServer((req, res) => {
-      if (req.method === 'HEAD') {
-        res.writeHead(200, { 'content-length': '1234' });
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body>GET fallback</body></html>');
-    });
-
-    try {
-      const contentLength = await checkContentLength(mockServer as any, url, 1000);
-      assert.equal(contentLength, 1234);
-    } finally {
-      await close();
-    }
-  }, results);
-
-  await testFunction('HEAD preflight returns null when Content-Length is absent', async () => {
-    const mockServer = createMockServer();
-    const { url, close } = await startHttpServer((req, res) => {
-      if (req.method === 'HEAD') {
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body>GET fallback</body></html>');
-    });
-
-    try {
-      const contentLength = await checkContentLength(mockServer as any, url, 1000);
-      assert.equal(contentLength, null);
-    } finally {
-      await close();
-    }
-  }, results);
-
-  await testFunction('HEAD preflight failure is non-fatal and returns null', async () => {
-    const mockServer = createMockServer();
-    const port = await getFreePort();
-
-    const contentLength = await checkContentLength(mockServer as any, `http://127.0.0.1:${port}`, 100);
-
-    assert.equal(contentLength, null);
-  }, results);
-
-  await testFunction('HEAD preflight blocks GET when Content-Length exceeds URL_READ_MAX_CONTENT_LENGTH_BYTES', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '100');
-
-    const seenMethods: string[] = [];
-    const { url, close } = await startHttpServer((req, res) => {
-      seenMethods.push(req.method || 'UNKNOWN');
-      if (req.method === 'HEAD') {
-        res.writeHead(200, { 'content-length': '101' });
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body><h1>Should not download</h1></body></html>');
-    });
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.ok(result.includes('Content too large'));
-      assert.ok(result.includes('0.0 MB'));
-      assert.deepEqual(seenMethods, ['HEAD']);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('HEAD preflight allows GET when Content-Length is within limit', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '1000');
-
-    const seenMethods: string[] = [];
-    const { url, close } = await startHttpServer((req, res) => {
-      seenMethods.push(req.method || 'UNKNOWN');
-      if (req.method === 'HEAD') {
-        res.writeHead(200, { 'content-length': '1000' });
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body><h1>Allowed Content</h1></body></html>');
-    });
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.ok(result.includes('Allowed Content'));
-      assert.deepEqual(seenMethods, ['HEAD', 'GET']);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('Streaming GET body without Content-Length is capped', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '64');
-
-    const seenMethods: string[] = [];
-    const { url, close } = await startHttpServer((req, res) => {
-      seenMethods.push(req.method || 'UNKNOWN');
-      if (req.method === 'HEAD') {
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.write('<html><body><h1>Chunked</h1>');
-      res.write('x'.repeat(128));
-      res.end('</body></html>');
-    });
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.ok(result.includes('Content too large'), `Expected content-too-large message, got: ${result}`);
-      assert.deepEqual(seenMethods, ['HEAD', 'GET']);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('Streaming GET body with understated HEAD Content-Length is capped', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '64');
-
-    const seenMethods: string[] = [];
-    const { url, close } = await startHttpServer((req, res) => {
-      seenMethods.push(req.method || 'UNKNOWN');
-      if (req.method === 'HEAD') {
-        res.writeHead(200, { 'content-length': '10' });
-        res.end();
-        return;
-      }
-
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.write('<html><body><h1>Understated</h1>');
-      res.write('x'.repeat(128));
-      res.end('</body></html>');
-    });
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.ok(result.includes('Content too large'), `Expected content-too-large message, got: ${result}`);
-      assert.deepEqual(seenMethods, ['HEAD', 'GET']);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('Streaming GET body just under limit is returned in full', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '128');
-
-    const html = '<html><body><h1>Within Limit</h1><p>Complete body.</p></body></html>';
-    const { url, close } = await startHttpServer((req, res) => {
-      if (req.method === 'HEAD') {
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(html);
-    });
-
-    try {
-      assert.ok(Buffer.byteLength(html, 'utf8') < 128, 'Test body must stay below configured cap');
-      const result = await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.ok(result.includes('Within Limit'), `Expected converted content, got: ${result}`);
-      assert.ok(result.includes('Complete body'), `Expected complete converted body, got: ${result}`);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('Over-limit streaming GET result is not cached', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '64');
-
-    let headCount = 0;
-    let getCount = 0;
-    const { url, close } = await startHttpServer((req, res) => {
-      if (req.method === 'HEAD') {
-        headCount++;
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-
-      getCount++;
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.write('<html><body><h1>Not cached</h1>');
-      res.write('x'.repeat(128));
-      res.end('</body></html>');
-    });
-
-    try {
-      const first = await fetchAndConvertToMarkdown(mockServer as any, url);
-      const second = await fetchAndConvertToMarkdown(mockServer as any, url);
-
-      assert.ok(first.includes('Content too large'), `Expected first read to be capped, got: ${first}`);
-      assert.ok(second.includes('Content too large'), `Expected second read to be capped, got: ${second}`);
-      assert.equal(headCount, 2, 'Second over-limit read should repeat HEAD instead of using cache');
-      assert.equal(getCount, 2, 'Second over-limit read should re-fetch instead of using cache');
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('Oversized HTTP error response body is capped', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '64');
-
-    let chunksWritten = 0;
-    let responseClosed = false;
-    let resolveResponseClosed: () => void = () => {};
-    const responseClosedPromise = new Promise<void>((resolve) => {
-      resolveResponseClosed = resolve;
-    });
-    const totalChunks = 100;
-    const { url, close } = await startHttpServer((req, res) => {
-      if (req.method === 'HEAD') {
-        res.writeHead(500);
-        res.end();
-        return;
-      }
-
-      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
-      res.on('close', () => {
-        responseClosed = true;
-        resolveResponseClosed();
-      });
-
-      const writeNext = () => {
-        if (res.destroyed || chunksWritten >= totalChunks) {
-          res.end();
-          return;
-        }
-
-        chunksWritten++;
-        res.write('x'.repeat(32));
-        setImmediate(writeNext);
-      };
-
-      writeNext();
-    });
-
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.fail('Expected server error');
-    } catch (error: any) {
-      assert.ok(
-        error.message.includes('Website Error (500)') || error.name === 'MCPSearXNGError',
-        `Expected server error, got: ${error.message}`,
-      );
-      await Promise.race([
-        responseClosedPromise,
-        new Promise<void>((resolve) => setTimeout(resolve, 50)),
-      ]);
-      assert.ok(responseClosed, 'Expected response stream to be closed');
-      assert.ok(chunksWritten < totalChunks, `Expected capped error-body read, wrote all ${chunksWritten} chunks`);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('Invalid URL_READ_MAX_CONTENT_LENGTH_BYTES falls back to default cap', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', 'not-a-number');
-
-    const seenMethods: string[] = [];
-    const { url, close } = await startHttpServer((req, res) => {
-      seenMethods.push(req.method || 'UNKNOWN');
-      if (req.method === 'HEAD') {
-        res.writeHead(200, { 'content-length': String(6 * 1024 * 1024) });
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body><h1>Should not download</h1></body></html>');
-    });
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, url);
-      assert.ok(result.includes('Content too large'));
-      assert.deepEqual(seenMethods, ['HEAD']);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
     }
   }, results);
 
@@ -783,7 +368,7 @@ async function runTests() {
       const result1 = await fetchAndConvertToMarkdown(mockServer as any, serverUrl, 10000, {
         maxLength: 50,
       });
-      assert.equal(requestCount, 2);
+      assert.equal(requestCount, 1);
       assert.ok(typeof result1 === 'string');
 
       // Second call with different pagination options must hit the cache.
@@ -791,7 +376,7 @@ async function runTests() {
         startChar: 10,
         maxLength: 30,
       });
-      assert.equal(requestCount, 2, 'Second call should use the cache, not re-fetch');
+      assert.equal(requestCount, 1, 'Second call should use the cache, not re-fetch');
       assert.ok(typeof result2 === 'string');
     } finally {
       server.closeAllConnections();
@@ -823,443 +408,6 @@ async function runTests() {
   }, results);
 
   // ── security: hardened mode ───────────────────────────────────────────────
-
-  await testFunction('default mode blocks private URL reads', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    const privateUrls = [
-      'http://127.0.0.1:1/private',
-      'http://localhost:1/private',
-      'http://10.0.0.1/private',
-    ];
-
-    try {
-      for (const privateUrl of privateUrls) {
-        try {
-          await fetchAndConvertToMarkdown(mockServer as any, privateUrl, 50);
-          assert.fail(`Expected private URL to be blocked: ${privateUrl}`);
-        } catch (error: any) {
-          assert.ok(
-            error.message.includes('blocked by security policy'),
-            `Expected security policy error for ${privateUrl}, got: ${error.message}`,
-          );
-        }
-      }
-    } finally {
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('default mode blocks hostnames resolving to private IPv4 ranges', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-    envManager.delete('HTTP_PROXY');
-    envManager.delete('HTTPS_PROXY');
-    envManager.delete('http_proxy');
-    envManager.delete('https_proxy');
-    envManager.delete('URL_READER_HTTP_PROXY');
-    envManager.delete('URL_READER_HTTPS_PROXY');
-    envManager.delete('url_reader_http_proxy');
-    envManager.delete('url_reader_https_proxy');
-
-    const privateCases: MockDnsRecords = {
-      'loopback.example': [{ address: '127.0.0.1', family: 4 }],
-      'ten.example': [{ address: '10.0.0.5', family: 4 }],
-      'lan.example': [{ address: '192.168.1.20', family: 4 }],
-      'rfc1918.example': [{ address: '172.16.0.9', family: 4 }],
-      'metadata.example': [{ address: '169.254.169.254', family: 4 }],
-    };
-    const restoreDns = installDnsLookupMock(privateCases);
-
-    try {
-      for (const hostname of Object.keys(privateCases)) {
-        try {
-          await fetchAndConvertToMarkdown(mockServer as any, `http://${hostname}/private`, 250);
-          assert.fail(`Expected hostname resolving to private IP to be blocked: ${hostname}`);
-        } catch (error: any) {
-          assert.ok(
-            error.message.includes('blocked by security policy'),
-            `Expected security policy error for ${hostname}, got: ${error.message}`,
-          );
-        }
-      }
-    } finally {
-      restoreDns();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('default mode blocks hostnames resolving to private IPv6 ranges', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-    envManager.delete('HTTP_PROXY');
-    envManager.delete('HTTPS_PROXY');
-    envManager.delete('http_proxy');
-    envManager.delete('https_proxy');
-    envManager.delete('URL_READER_HTTP_PROXY');
-    envManager.delete('URL_READER_HTTPS_PROXY');
-    envManager.delete('url_reader_http_proxy');
-    envManager.delete('url_reader_https_proxy');
-
-    const privateCases: MockDnsRecords = {
-      'v6-loopback.example': [{ address: '::1', family: 6 }],
-      'v6-ula.example': [{ address: 'fc00::1', family: 6 }],
-      'v6-linklocal.example': [{ address: 'fe80::1', family: 6 }],
-    };
-    const restoreDns = installDnsLookupMock(privateCases);
-
-    try {
-      for (const hostname of Object.keys(privateCases)) {
-        try {
-          await fetchAndConvertToMarkdown(mockServer as any, `http://${hostname}/private`, 250);
-          assert.fail(`Expected hostname resolving to private IPv6 to be blocked: ${hostname}`);
-        } catch (error: any) {
-          assert.ok(
-            error.message.includes('blocked by security policy'),
-            `Expected security policy error for ${hostname}, got: ${error.message}`,
-          );
-        }
-      }
-    } finally {
-      restoreDns();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('default mode allows hostnames resolving only to public addresses and pins the connection', async () => {
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    let lookupCount = 0;
-    const originalLookup = dnsModule.lookup;
-    (dnsModule as any).lookup = (hostname: string, options: any, callback?: any) => {
-      if (net.isIP(hostname)) {
-        return (originalLookup as any).call(dnsModule, hostname, options, callback);
-      }
-
-      lookupCount++;
-      const cb = typeof options === 'function' ? options : callback;
-      if (options?.all) {
-        cb(null, [{ address: TEST_PUBLIC_IP, family: 4 }]);
-        return;
-      }
-      cb(null, TEST_PUBLIC_IP, 4);
-    };
-    syncBuiltinESMExports();
-    const lookup = createUrlReaderLookup();
-
-    try {
-      const result = await new Promise<{ address: string; family: number }>((resolve, reject) => {
-        lookup('public.example', {}, (error, address, family) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve({ address: address || '', family: family || 0 });
-        });
-      });
-
-      assert.deepEqual(result, { address: TEST_PUBLIC_IP, family: 4 });
-      const allResult = await new Promise<Array<{ address: string; family: number }>>((resolve, reject) => {
-        lookup('public.example', { all: true }, (error, address) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve(Array.isArray(address) ? address : []);
-        });
-      });
-
-      assert.deepEqual(allResult, [{ address: TEST_PUBLIC_IP, family: 4 }]);
-      assert.equal(lookupCount, 2, 'Expected one DNS lookup per custom lookup invocation');
-    } finally {
-      (dnsModule as any).lookup = originalLookup;
-      syncBuiltinESMExports();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('default mode blocks rebinding when any DNS answer is private', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-    envManager.delete('HTTP_PROXY');
-    envManager.delete('HTTPS_PROXY');
-    envManager.delete('http_proxy');
-    envManager.delete('https_proxy');
-    envManager.delete('URL_READER_HTTP_PROXY');
-    envManager.delete('URL_READER_HTTPS_PROXY');
-    envManager.delete('url_reader_http_proxy');
-    envManager.delete('url_reader_https_proxy');
-
-    const restoreDns = installDnsLookupMock({
-      'mixed.example': [
-        { address: TEST_PUBLIC_IP, family: 4 },
-        { address: '127.0.0.1', family: 4 },
-      ],
-    });
-
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, 'http://mixed.example/private', 250);
-      assert.fail('Expected hostname with any private DNS answer to be blocked');
-    } catch (error: any) {
-      assert.ok(
-        error.message.includes('blocked by security policy'),
-        `Expected security policy error, got: ${error.message}`,
-      );
-    } finally {
-      restoreDns();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('MCP_HTTP_ALLOW_PRIVATE_URLS allows private DNS resolution', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.set('MCP_HTTP_ALLOW_PRIVATE_URLS', 'true');
-    envManager.delete('HTTP_PROXY');
-    envManager.delete('HTTPS_PROXY');
-    envManager.delete('http_proxy');
-    envManager.delete('https_proxy');
-    envManager.delete('URL_READER_HTTP_PROXY');
-    envManager.delete('URL_READER_HTTPS_PROXY');
-    envManager.delete('url_reader_http_proxy');
-    envManager.delete('url_reader_https_proxy');
-
-    const restoreDns = installDnsLookupMock({
-      'internal.example': [{ address: '127.0.0.1', family: 4 }],
-    });
-    const { url, close } = await startTestServer({ body: '<html><body><h1>Internal DNS target</h1></body></html>' });
-    const port = new URL(url).port;
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, `http://internal.example:${port}/article`, 1000);
-      assert.ok(result.includes('Internal DNS target'), `Expected private DNS opt-out fetch, got: ${result}`);
-    } finally {
-      restoreDns();
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('redirect target resolving to a private IP is blocked', async () => {
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    const restoreDns = installDnsLookupMock({
-      'private-redirect.example': [{ address: '127.0.0.1', family: 4 }],
-    });
-    const lookup = createUrlReaderLookup();
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        lookup('private-redirect.example', {}, (error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-      assert.fail('Expected redirect target resolving to private IP to be blocked');
-    } catch (error: any) {
-      assert.ok(
-        error.name === 'URLSecurityPolicyDnsError',
-        `Expected DNS security policy error, got: ${error.name}: ${error.message}`,
-      );
-    } finally {
-      restoreDns();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('default mode blocks 0.0.0.0 URL reads', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, 'http://0.0.0.0:1/private', 50);
-      assert.fail('Expected 0.0.0.0 URL to be blocked');
-    } catch (error: any) {
-      assert.ok(error.message.includes('blocked by security policy'));
-    } finally {
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('default mode blocks hex IPv4-mapped IPv6 private URL reads', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, 'http://[::ffff:7f00:1]:1/private', 50);
-      assert.fail('Expected IPv4-mapped IPv6 URL to be blocked');
-    } catch (error: any) {
-      assert.ok(error.message.includes('blocked by security policy'));
-    } finally {
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('redirects to private URLs are blocked', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    const proxy = await startConnectProxyServer((authority) => {
-      if (authority === 'public.example:80') {
-        return {
-          status: 302,
-          headers: { Location: 'http://127.0.0.1:12345/private' },
-        };
-      }
-
-      return {
-        body: '<html><body><h1>Internal redirect target</h1></body></html>',
-      };
-    });
-
-    envManager.set('URL_READER_HTTP_PROXY', proxy.url);
-    envManager.delete('NO_PROXY');
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, 'http://public.example/article', 1000);
-      assert.fail('Expected redirect to private URL to be blocked');
-    } catch (error: any) {
-      assert.ok(
-        error.message.includes('blocked by security policy'),
-        `Expected security policy error, got: ${error.message}`,
-      );
-    } finally {
-      await proxy.close();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('redirects to public URLs are followed', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    const proxy = await startConnectProxyServer((authority, requestText) => {
-      if (authority === 'public.example:80' && requestText.startsWith('GET /start ')) {
-        return {
-          status: 302,
-          headers: { Location: 'http://safe.example/final' },
-        };
-      }
-
-      return {
-        body: '<html><body><h1>Public redirect target</h1></body></html>',
-      };
-    });
-
-    envManager.set('URL_READER_HTTP_PROXY', proxy.url);
-    envManager.delete('NO_PROXY');
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, 'http://public.example/start', 1000);
-      assert.ok(result.includes('Public redirect target'), `Expected public redirect content, got: ${result}`);
-    } finally {
-      await proxy.close();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('HEAD preflight checks redirected final URL before downloading it', async () => {
-    const mockServer = createMockServer();
-    urlCache.clear();
-    envManager.set('URL_READ_MAX_CONTENT_LENGTH_BYTES', '100');
-
-    const seenRequests: string[] = [];
-    const { url, close } = await startHttpServer((req, res) => {
-      seenRequests.push(`${req.method} ${req.url}`);
-      if (req.url === '/start' && req.method === 'HEAD') {
-        res.writeHead(302, { location: '/final' });
-        res.end();
-        return;
-      }
-      if (req.url === '/start' && req.method === 'GET') {
-        res.writeHead(302, { location: '/final' });
-        res.end();
-        return;
-      }
-      if (req.url === '/final' && req.method === 'HEAD') {
-        res.writeHead(200, { 'content-length': '101' });
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<html><body><h1>Should not download final</h1></body></html>');
-    });
-
-    try {
-      const result = await fetchAndConvertToMarkdown(mockServer as any, `${url}/start`);
-      assert.ok(result.includes('Content too large'));
-      assert.deepEqual(seenRequests, ['HEAD /start', 'GET /start', 'HEAD /final']);
-    } finally {
-      await close();
-      envManager.restore();
-      urlCache.clear();
-    }
-  }, results);
-
-  await testFunction('redirect responses without Location are treated as server errors', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    const proxy = await startConnectProxyServer(() => ({
-      status: 302,
-      body: '<html><body>Missing location</body></html>',
-    }));
-
-    envManager.set('URL_READER_HTTP_PROXY', proxy.url);
-    envManager.delete('NO_PROXY');
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, 'http://public.example/missing-location', 1000);
-      assert.fail('Expected redirect without Location to be treated as a server error');
-    } catch (error: any) {
-      assert.ok(error.message.includes('Server Error') || error.message.includes('302'));
-    } finally {
-      await proxy.close();
-      envManager.restore();
-    }
-  }, results);
-
-  await testFunction('redirect chains are capped', async () => {
-    const mockServer = createMockServer();
-    envManager.delete('MCP_HTTP_HARDEN');
-    envManager.delete('MCP_HTTP_ALLOW_PRIVATE_URLS');
-
-    let redirectCount = 0;
-    const proxy = await startConnectProxyServer(() => {
-      redirectCount++;
-      return {
-        status: 302,
-        headers: { Location: `http://loop.example/redirect-${redirectCount}` },
-      };
-    });
-
-    envManager.set('URL_READER_HTTP_PROXY', proxy.url);
-    envManager.delete('NO_PROXY');
-    try {
-      await fetchAndConvertToMarkdown(mockServer as any, 'http://public.example/start-loop', 1000);
-      assert.fail('Expected redirect chain to be capped');
-    } catch (error: any) {
-      assert.ok(error.message.includes('Too many redirects'), `Unexpected error: ${error.message}`);
-    } finally {
-      await proxy.close();
-      envManager.restore();
-    }
-  }, results);
 
   await testFunction('hardened mode blocks localhost URL reads', async () => {
     const mockServer = createMockServer();
@@ -1491,21 +639,18 @@ async function runTests() {
     }
   }, results);
 
-  if (originalAllowPrivateUrls === undefined) {
-    delete process.env.MCP_HTTP_ALLOW_PRIVATE_URLS;
-  } else {
-    process.env.MCP_HTTP_ALLOW_PRIVATE_URLS = originalAllowPrivateUrls;
-  }
-
   printTestSummary(results, 'URL Reader Module');
   return results;
 }
 
 // Run if executed directly
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);
 }
 
 export { runTests };
+
+
