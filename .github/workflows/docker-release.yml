@@ -9,7 +9,6 @@ on:
   push:
     tags:
       - 'docker-rebuild-v*'
-      - 'sync-*'
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +17,7 @@ concurrency:
 
 env:
   PLATFORMS: linux/amd64,linux/arm64
-  IMAGE_NAME: cpxazn/mcp-searxng
+  IMAGE_NAME: isokoliuk/mcp-searxng
 
 jobs:
   push_to_registry:
@@ -64,12 +63,6 @@ jobs:
             echo "version=${version}" >> "$GITHUB_OUTPUT"
             echo "major=${major}" >> "$GITHUB_OUTPUT"
             echo "major_minor=${major_minor}" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_REF_NAME}" == sync-* ]]; then
-            # Use the sync tag directly as the Docker tag
-            version="${GITHUB_REF_NAME}"
-            echo "has_version=true" >> "$GITHUB_OUTPUT"
-            echo "version=${version}" >> "$GITHUB_OUTPUT"
-            echo "publish_latest=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_version=false" >> "$GITHUB_OUTPUT"
           fi

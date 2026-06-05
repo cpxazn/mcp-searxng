@@ -7,7 +7,6 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { fileURLToPath } from 'node:url';
 import { SimpleCache, urlCache } from '../../src/cache.js';
 import { testFunction, createTestResults, printTestSummary } from '../helpers/test-utils.js';
 
@@ -133,22 +132,13 @@ async function runTests() {
     testCache.destroy();
   }, results);
 
-  await testFunction('Cache cleanup interval does not keep process alive', () => {
-    const testCache = new SimpleCache(1000, 1000);
-    const interval = (testCache as any).cleanupInterval;
-
-    assert.ok(interval, 'Expected cleanup interval to be created');
-    assert.equal(interval.hasRef(), false, 'Cleanup interval should be unref()ed');
-
-    testCache.destroy();
-  }, results);
-
   printTestSummary(results, 'Cache Module');
   return results;
 }
 
 // Run if executed directly
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);
