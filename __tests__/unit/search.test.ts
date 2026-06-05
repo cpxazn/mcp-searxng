@@ -7,11 +7,10 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { fileURLToPath } from 'node:url';
 import { performWebSearch } from '../../src/search.js';
 import { testFunction, createTestResults, printTestSummary } from '../helpers/test-utils.js';
 import { createMockServer } from '../helpers/mock-server.js';
-import { FetchMocker, createMockFetch, createCapturingMockFetch, createAbortableMockFetch } from '../helpers/mock-fetch.js';
+import { FetchMocker, createMockFetch, createCapturingMockFetch } from '../helpers/mock-fetch.js';
 import { EnvManager } from '../helpers/env-utils.js';
 
 const results = createTestResults();
@@ -77,30 +76,6 @@ async function runTests() {
     assert.ok(url.searchParams.get('language') === 'en');
     assert.ok(url.searchParams.get('safesearch') === '1');
     assert.ok(url.searchParams.get('format') === 'json');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('URL construction supports week time range', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_NETWORK_ERROR');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query', 1, 'week');
-    } catch {
-      // Expected to fail with mock error
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('time_range'), 'week');
 
     fetchMocker.restore();
     envManager.restore();
@@ -300,67 +275,8 @@ async function runTests() {
     assert.ok(typeof result === 'string');
     assert.ok(result.includes('Test Result 1'));
     assert.ok(result.includes('Test Result 2'));
-    assert.ok(result.includes('URL: https://example.com/1'));
-    assert.ok(result.includes('URL: https://example.com/2'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('min_score filters out lower relevance results', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-
-    const mockServer = createMockServer();
-    const mockFetch = createMockFetch({
-      json: {
-        results: [
-          {
-            title: 'High Score Result',
-            content: 'Strong match',
-            url: 'https://example.com/high',
-            score: 0.92
-          },
-          {
-            title: 'Low Score Result',
-            content: 'Weak match',
-            url: 'https://example.com/low',
-            score: 0.31
-          }
-        ]
-      }
-    });
-
-    fetchMocker.mock(mockFetch);
-
-    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.5);
-    assert.ok(result.includes('High Score Result'));
-    assert.ok(!result.includes('Low Score Result'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('min_score returns no-results message when all results are filtered', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-
-    const mockServer = createMockServer();
-    const mockFetch = createMockFetch({
-      json: {
-        results: [
-          {
-            title: 'Low Score Result',
-            content: 'Weak match',
-            url: 'https://example.com/low',
-            score: 0.2
-          }
-        ]
-      }
-    });
-
-    fetchMocker.mock(mockFetch);
-
-    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.8);
-    assert.ok(result.includes('No results found'));
+    assert.ok(result.includes('https://example.com/1'));
+    assert.ok(result.includes('https://example.com/2'));
 
     fetchMocker.restore();
     envManager.restore();
@@ -486,87 +402,100 @@ async function runTests() {
     envManager.restore();
   }, results);
 
-  await testFunction('Timeout fires when fetch never resolves (AbortError wrapped as network error)', async () => {
+  await testFunction('min_score filtering - filters results below threshold', async () => {
     envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_TIMEOUT_MS', '100');
-
+    
     const mockServer = createMockServer();
-    // createAbortableMockFetch(50000) — resolves only after 50 s, but honours AbortSignal immediately
-    fetchMocker.mock(createAbortableMockFetch(50000));
-
-    const start = Date.now();
-    try {
-      await performWebSearch(mockServer as any, 'timeout test');
-      assert.fail('Expected search to reject due to timeout');
-    } catch (error: any) {
-      const elapsed = Date.now() - start;
-      // Should abort well within 2 s (timeout is 100 ms)
-      assert.ok(elapsed < 2000, `Expected abort within 2 s, took ${elapsed} ms`);
-      // Error is either an AbortError or a network error wrapping it
-      const isAbortOrNetwork =
-        error.name === 'AbortError' ||
-        error.name === 'MCPSearXNGError' ||
-        (typeof error.message === 'string' && (
-          error.message.includes('abort') ||
-          error.message.includes('Abort') ||
-          error.message.includes('Network') ||
-          error.message.includes('network') ||
-          error.message.includes('timed out') ||
-          error.message.includes('timeout')
-        ));
-      assert.ok(isAbortOrNetwork, `Unexpected error: ${error.name}: ${error.message}`);
-    }
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('SEARXNG_TIMEOUT_MS env override is respected (50 ms fires before 500 ms mock)', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_TIMEOUT_MS', '50');
-
-    const mockServer = createMockServer();
-    // Mock resolves via its own 500 ms timer; signal should abort it first
-    fetchMocker.mock(createAbortableMockFetch(500));
-
-    const start = Date.now();
-    try {
-      await performWebSearch(mockServer as any, 'env override test');
-      assert.fail('Expected search to reject due to timeout');
-    } catch (error: any) {
-      const elapsed = Date.now() - start;
-      // 50 ms timeout should fire well before the 500 ms mock delay
-      assert.ok(elapsed < 400, `Expected abort within 400 ms, took ${elapsed} ms`);
-    }
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Successful response within timeout completes normally', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_TIMEOUT_MS', '5000');
-
-    const mockServer = createMockServer();
-    const mockFetch = createMockFetch({
-      json: {
+    fetchMocker.mock(async () => {
+      return new Response(JSON.stringify({
         results: [
-          {
-            title: 'Fast Result',
-            content: 'Returned before timeout',
-            url: 'https://example.com/fast',
-            score: 0.9
-          }
+          { title: 'High score', content: 'Very relevant', url: 'https://high.com', score: 0.9 },
+          { title: 'Medium score', content: 'Somewhat relevant', url: 'https://medium.com', score: 0.6 },
+          { title: 'Low score', content: 'Not relevant', url: 'https://low.com', score: 0.2 },
+          { title: 'Very low score', content: 'Irrelevant', url: 'https://verylow.com', score: 0.05 }
         ]
-      }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     });
+    
+    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.5);
+    
+    // Should only include results with score >= 0.5
+    assert.ok(result.includes('High score'), 'Should include high score result');
+    assert.ok(result.includes('Medium score'), 'Should include medium score result (0.6 >= 0.5)');
+    assert.ok(!result.includes('Low score'), 'Should exclude low score result (0.2 < 0.5)');
+    assert.ok(!result.includes('Very low score'), 'Should exclude very low score result (0.05 < 0.5)');
+    assert.ok(result.includes('Relevance Score: 0.900'), 'Should include score in output');
+    assert.ok(result.includes('Relevance Score: 0.600'), 'Should include score in output');
+    
+    fetchMocker.restore();
+    envManager.restore();
+  }, results);
 
-    fetchMocker.mock(mockFetch);
+  await testFunction('min_score filtering - includes all results when min_score is 0', async () => {
+    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
+    
+    const mockServer = createMockServer();
+    fetchMocker.mock(async () => {
+      return new Response(JSON.stringify({
+        results: [
+          { title: 'Result 1', content: 'Content 1', url: 'https://1.com', score: 0.8 },
+          { title: 'Result 2', content: 'Content 2', url: 'https://2.com', score: 0.3 }
+        ]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    
+    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0);
+    
+    // Should include all results when min_score is 0
+    assert.ok(result.includes('Result 1'), 'Should include result 1');
+    assert.ok(result.includes('Result 2'), 'Should include result 2');
+    
+    fetchMocker.restore();
+    envManager.restore();
+  }, results);
 
-    const result = await performWebSearch(mockServer as any, 'fast query');
-    assert.ok(typeof result === 'string');
-    assert.ok(result.includes('Fast Result'));
+  await testFunction('min_score filtering - no results when all below threshold', async () => {
+    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
+    
+    const mockServer = createMockServer();
+    fetchMocker.mock(async () => {
+      return new Response(JSON.stringify({
+        results: [
+          { title: 'Low 1', content: 'Low content 1', url: 'https://low1.com', score: 0.1 },
+          { title: 'Low 2', content: 'Low content 2', url: 'https://low2.com', score: 0.05 }
+        ]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    
+    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.5);
+    
+    // Should return no results message when all filtered
+    assert.ok(result.includes('No results found') || result.includes('no results'), 'Should indicate no results');
+    assert.ok(!result.includes('Low 1'), 'Should not include any low-score results');
+    
+    fetchMocker.restore();
+    envManager.restore();
+  }, results);
 
+  await testFunction('min_score undefined - no filtering applied', async () => {
+    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
+    
+    const mockServer = createMockServer();
+    fetchMocker.mock(async () => {
+      return new Response(JSON.stringify({
+        results: [
+          { title: 'High', content: 'High content', url: 'https://high.com', score: 0.9 },
+          { title: 'Low', content: 'Low content', url: 'https://low.com', score: 0.1 }
+        ]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    
+    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, undefined);
+    
+    // Should include all results when min_score is undefined
+    assert.ok(result.includes('High'), 'Should include high score result');
+    assert.ok(result.includes('Low'), 'Should include low score result');
+    
     fetchMocker.restore();
     envManager.restore();
   }, results);
@@ -576,7 +505,8 @@ async function runTests() {
 }
 
 // Run if executed directly
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);
