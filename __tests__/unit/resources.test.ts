@@ -7,7 +7,6 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { fileURLToPath } from 'node:url';
 import { createConfigResource, createHelpResource } from '../../src/resources.js';
 import { testFunction, createTestResults, printTestSummary } from '../helpers/test-utils.js';
 import { EnvManager } from '../helpers/env-utils.js';
@@ -154,7 +153,8 @@ async function runTests() {
 }
 
 // Run if executed directly
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);

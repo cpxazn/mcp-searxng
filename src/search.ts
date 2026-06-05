@@ -29,7 +29,8 @@ export async function performWebSearch(
     `page ${pageno}`,
     `lang: ${language}`,
     time_range ? `time: ${time_range}` : null,
-    safesearch ? `safesearch: ${safesearch}` : null
+    safesearch ? `safesearch: ${safesearch}` : null,
+    min_score !== undefined ? `min_score: ${min_score}` : null
   ].filter(Boolean).join(", ");
   
   logMessage(mcpServer, "info", `Starting web search: "${query}" (${searchParams})`);
@@ -51,7 +52,7 @@ export async function performWebSearch(
 
   if (
     time_range !== undefined &&
-    ["day", "week", "month", "year"].includes(time_range)
+    ["day", "month", "year"].includes(time_range)
   ) {
     url.searchParams.set("time_range", time_range);
   }
@@ -97,20 +98,12 @@ export async function performWebSearch(
     };
   }
 
-  // Fetch with AbortController timeout and enhanced error handling
-  const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARXNG_TIMEOUT_MS ?? "10000", 10);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-
+  // Fetch with enhanced error handling
   let response: Response;
   try {
     logMessage(mcpServer, "info", `Making request to: ${url.toString()}`);
-    response = await fetch(url.toString(), {
-      ...requestOptions,
-      signal: controller.signal,
-    });
+    response = await fetch(url.toString(), requestOptions);
   } catch (error: any) {
-    clearTimeout(timeoutId);
     logMessage(mcpServer, "error", `Network error during search request: ${error.message}`, { query, url: url.toString() });
     const context: ErrorContext = {
       url: url.toString(),
@@ -120,7 +113,6 @@ export async function performWebSearch(
     };
     throw createNetworkError(error, context);
   }
-  clearTimeout(timeoutId);
 
   if (!response.ok) {
     let responseBody: string;
@@ -165,11 +157,13 @@ export async function performWebSearch(
       url: result.url || "",
       score: result.score || 0,
     }))
-    .filter((result) => min_score === undefined || result.score >= min_score);
+    .filter((r) => min_score === undefined || r.score >= min_score);
 
   if (results.length === 0) {
-    const filterNote = min_score === undefined ? "" : ` after applying min_score=${min_score}`;
-    logMessage(mcpServer, "info", `No results found for query: "${query}"${filterNote}`);
+    const reason = min_score !== undefined
+      ? `No results found for query: "${query}" (all results filtered by min_score: ${min_score})`
+      : `No results found for query: "${query}"`;
+    logMessage(mcpServer, "info", reason);
     return createNoResultsMessage(query);
   }
 
