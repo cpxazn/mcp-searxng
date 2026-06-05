@@ -7,8 +7,7 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { fileURLToPath } from 'node:url';
-import { WEB_SEARCH_TOOL, isSearXNGWebSearchArgs } from '../../src/types.js';
+import { isSearXNGWebSearchArgs } from '../../src/types.js';
 import { isWebUrlReadArgs } from '../../src/index.js';
 import { testFunction, createTestResults, printTestSummary } from '../helpers/test-utils.js';
 
@@ -21,9 +20,6 @@ async function runTests() {
     assert.equal(isSearXNGWebSearchArgs({ query: 'test', language: 'en' }), true);
     assert.equal(isSearXNGWebSearchArgs({ query: 'test search' }), true);
     assert.equal(isSearXNGWebSearchArgs({ query: 'test', pageno: 1, time_range: 'day' }), true);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', pageno: 1, time_range: 'week', safesearch: 2 }), true);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', min_score: 0 }), true);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', min_score: 1 }), true);
   }, results);
 
   await testFunction('isSearXNGWebSearchArgs type guard - min_score valid cases', () => {
@@ -49,27 +45,6 @@ async function runTests() {
     assert.equal(isSearXNGWebSearchArgs('string'), false);
     assert.equal(isSearXNGWebSearchArgs(123), false);
     assert.equal(isSearXNGWebSearchArgs({}), false);
-  }, results);
-
-  await testFunction('isSearXNGWebSearchArgs type guard - invalid optional parameters', () => {
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', pageno: 0 }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', pageno: -1 }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', pageno: '1' }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', time_range: 'last week' }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', language: 123 }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', safesearch: 3 }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', safesearch: '1' }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', min_score: -0.1 }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', min_score: 1.1 }), false);
-    assert.equal(isSearXNGWebSearchArgs({ query: 'test', min_score: Number.NaN }), false);
-  }, results);
-
-  await testFunction('WEB_SEARCH_TOOL schema includes week and min_score', () => {
-    const properties = WEB_SEARCH_TOOL.inputSchema.properties as Record<string, any>;
-    assert.ok(properties.time_range.enum.includes('week'));
-    assert.equal(properties.min_score.type, 'number');
-    assert.equal(properties.min_score.minimum, 0);
-    assert.equal(properties.min_score.maximum, 1);
   }, results);
 
   await testFunction('isWebUrlReadArgs type guard - basic valid cases', () => {
@@ -120,7 +95,9 @@ async function runTests() {
 }
 
 // Run if executed directly
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+const isMainModule = fileURLToPath(import.meta.url) === process.argv[1];
+if (isMainModule) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);

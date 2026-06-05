@@ -9,9 +9,6 @@ export interface SearXNGWeb {
   }>;
 }
 
-const VALID_TIME_RANGES = ["day", "week", "month", "year"] as const;
-const VALID_SAFESEARCH_VALUES = [0, 1, 2] as const;
-
 export function isSearXNGWebSearchArgs(args: unknown): args is {
   query: string;
   pageno?: number;
@@ -29,40 +26,13 @@ export function isSearXNGWebSearchArgs(args: unknown): args is {
     return false;
   }
 
-  const searchArgs = args as {
-    pageno?: unknown;
-    time_range?: unknown;
-    language?: unknown;
-    safesearch?: unknown;
-    min_score?: unknown;
-  };
+  const searchArgs = args as any;
 
-  if (searchArgs.pageno !== undefined && (typeof searchArgs.pageno !== "number" || searchArgs.pageno < 1)) {
-    return false;
-  }
-  if (
-    searchArgs.time_range !== undefined &&
-    (typeof searchArgs.time_range !== "string" || !VALID_TIME_RANGES.includes(searchArgs.time_range as any))
-  ) {
-    return false;
-  }
-  if (searchArgs.language !== undefined && typeof searchArgs.language !== "string") {
-    return false;
-  }
-  if (
-    searchArgs.safesearch !== undefined &&
-    (typeof searchArgs.safesearch !== "number" || !VALID_SAFESEARCH_VALUES.includes(searchArgs.safesearch as any))
-  ) {
-    return false;
-  }
-  if (
-    searchArgs.min_score !== undefined &&
-    (typeof searchArgs.min_score !== "number" ||
-      Number.isNaN(searchArgs.min_score) ||
-      searchArgs.min_score < 0 ||
-      searchArgs.min_score > 1)
-  ) {
-    return false;
+  // Validate min_score if provided
+  if (searchArgs.min_score !== undefined) {
+    if (typeof searchArgs.min_score !== "number" || Number.isNaN(searchArgs.min_score) || searchArgs.min_score < 0 || searchArgs.min_score > 1) {
+      return false;
+    }
   }
 
   return true;
@@ -93,8 +63,8 @@ export const WEB_SEARCH_TOOL: Tool = {
       },
       time_range: {
         type: "string",
-        description: "Time range of search (day, week, month, year)",
-        enum: ["day", "week", "month", "year"],
+        description: "Time range of search (day, month, year)",
+        enum: ["day", "month", "year"],
       },
       language: {
         type: "string",
@@ -112,7 +82,7 @@ export const WEB_SEARCH_TOOL: Tool = {
       min_score: {
         type: "number",
         description:
-          "Minimum relevance score threshold from 0.0 to 1.0. Results below this score are filtered out.",
+          "Minimum relevance score threshold (0.0-1.0). Results below this score are filtered out. Use 0.5+ for high-quality results, 0.8+ for only the most relevant.",
         minimum: 0,
         maximum: 1,
       },

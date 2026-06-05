@@ -7,7 +7,6 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHttpServer } from '../../src/http-server.js';
@@ -290,7 +289,8 @@ async function runTests() {
 }
 
 // Run if executed directly
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+import { fileURLToPath } from 'node:url';
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);
