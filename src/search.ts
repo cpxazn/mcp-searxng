@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SearXNGWeb } from "./types.js";
-import { getKnownEngines } from "./instance-info.js";
 import { createProxyAgent, createDefaultAgent, ProxyType } from "./proxy.js";
 import { logMessage } from "./logging.js";
 import {
@@ -14,150 +13,24 @@ import {
   type ErrorContext
 } from "./error-handler.js";
 
-const ENGINE_VALIDATION_WARNING = "Engine names were not validated because SearXNG /config is unavailable.";
-const ENGINE_VALIDATION_NOTE = "Note: engine names were not validated (SearXNG /config unavailable).";
-
-function getOperatorMaxResults(mcpServer: McpServer): number | undefined {
-  const rawValue = process.env.SEARXNG_MAX_RESULTS;
-  if (rawValue === undefined || rawValue.trim() === "") {
-    return undefined;
-  }
-
-  const parsed = parseInt(rawValue, 10);
-  if (Number.isNaN(parsed) || parsed <= 0 || parsed > 20) {
-    logMessage(
-      mcpServer,
-      "warning",
-      `Ignoring invalid SEARXNG_MAX_RESULTS="${rawValue}". Expected an integer from 1 to 20.`,
-    );
-    return undefined;
-  }
-
-  return parsed;
-}
-
-function getMaxResultChars(mcpServer: McpServer): number | undefined {
-  const rawValue = process.env.SEARXNG_MAX_RESULT_CHARS;
-  if (rawValue === undefined || rawValue.trim() === "") {
-    return undefined;
-  }
-
-  const parsed = parseInt(rawValue, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) {
-    logMessage(
-      mcpServer,
-      "warning",
-      `Ignoring invalid SEARXNG_MAX_RESULT_CHARS="${rawValue}". Expected a positive integer.`,
-    );
-    return undefined;
-  }
-
-  return parsed;
-}
-
-function truncateResultContent(content: string, maxResultChars?: number): string {
-  if (maxResultChars === undefined || content.length <= maxResultChars) {
-    return content;
-  }
-
-  return `${content.slice(0, maxResultChars)}…`;
-}
-
-function hasItems<T>(items: T[] | undefined): items is T[] {
-  return Array.isArray(items) && items.length > 0;
-}
-
-function formatSearchMetadata(data: SearXNGWeb): string {
-  const sections: string[] = [];
-
-  if (hasItems(data.answers)) {
-    sections.push(data.answers.map((answer) => `Direct answer: ${answer}`).join("\n"));
-  }
-
-  if (hasItems(data.corrections)) {
-    sections.push(data.corrections.map((correction) => `Spelling correction: did you mean "${correction}"?`).join("\n"));
-  }
-
-  if (hasItems(data.suggestions)) {
-    sections.push(`Suggestions: ${data.suggestions.join(", ")}`);
-  }
-
-  if (hasItems(data.infoboxes)) {
-    const infoboxText = data.infoboxes
-      .map((infobox) => {
-        const lines = [`Infobox: ${infobox.infobox}`];
-        if (infobox.content) {
-          lines.push(infobox.content);
-        }
-        if (hasItems(infobox.urls)) {
-          lines.push(...infobox.urls.map((entry) => `${entry.title}: ${entry.url}`));
-        }
-        return lines.join("\n");
-      })
-      .join("\n\n");
-    sections.push(infoboxText);
-  }
-
-  return sections.join("\n\n");
-}
-
-function getDefaultLanguage(): string {
-  return process.env.SEARXNG_DEFAULT_LANGUAGE ?? "all";
-}
-
-function getDefaultSafesearch(mcpServer: McpServer): number | undefined {
-  const rawValue = process.env.SEARXNG_DEFAULT_SAFESEARCH;
-  if (rawValue === undefined || rawValue.trim() === "") {
-    return undefined;
-  }
-
-  const parsed = parseInt(rawValue, 10);
-  if (Number.isNaN(parsed) || ![0, 1, 2].includes(parsed)) {
-    logMessage(
-      mcpServer,
-      "warning",
-      `Ignoring invalid SEARXNG_DEFAULT_SAFESEARCH="${rawValue}". Expected 0, 1, or 2.`,
-    );
-    return undefined;
-  }
-
-  return parsed;
-}
-
 export async function performWebSearch(
   mcpServer: McpServer,
   query: string,
   pageno: number = 1,
   time_range?: string,
-  language?: string,
+  language: string = "all",
   safesearch?: number,
-  min_score?: number,
-  num_results?: number,
-  categories?: string,
-  engines?: string,
-  response_format: "text" | "json" = "text",
+  min_score?: number
 ) {
   const startTime = Date.now();
-  const operatorMax = getOperatorMaxResults(mcpServer);
-  const effectiveMax = operatorMax !== undefined
-    ? (num_results !== undefined ? Math.min(num_results, operatorMax) : operatorMax)
-    : num_results;
-  const maxResultChars = getMaxResultChars(mcpServer);
-
-  const effectiveLanguage = language ?? getDefaultLanguage();
-  const effectiveSafesearch = safesearch !== undefined ? safesearch : getDefaultSafesearch(mcpServer);
-  const effectiveEngines = engines !== undefined && engines.trim() !== "" ? engines : undefined;
-
+  
   // Build detailed log message with all parameters
   const searchParams = [
     `page ${pageno}`,
-    `lang: ${effectiveLanguage}`,
+    `lang: ${language}`,
     time_range ? `time: ${time_range}` : null,
-    effectiveSafesearch !== undefined ? `safesearch: ${effectiveSafesearch}` : null,
-    min_score !== undefined ? `min_score: ${min_score}` : null,
-    effectiveMax !== undefined ? `num_results: ${effectiveMax}` : null,
-    categories ? `categories: ${categories}` : null,
-    effectiveEngines ? `engines: ${effectiveEngines}` : null,
+    safesearch ? `safesearch: ${safesearch}` : null,
+    min_score !== undefined ? `min_score: ${min_score}` : null
   ].filter(Boolean).join(", ");
   
   logMessage(mcpServer, "info", `Starting web search: "${query}" (${searchParams})`);
@@ -170,27 +43,6 @@ export async function performWebSearch(
 
   const searxngUrl = process.env.SEARXNG_URL!;
   const parsedUrl = new URL(searxngUrl.endsWith('/') ? searxngUrl : searxngUrl + '/');
-  let engineValidationWarning: string | undefined;
-
-  if (effectiveEngines) {
-    const knownEngines = await getKnownEngines(mcpServer);
-    if (knownEngines === null) {
-      engineValidationWarning = ENGINE_VALIDATION_WARNING;
-    } else {
-      const requestedEngines = effectiveEngines
-        .split(",")
-        .map((engine) => engine.trim())
-        .filter((engine) => engine !== "");
-      const invalidEngines = requestedEngines.filter((engine) => !knownEngines.has(engine));
-
-      if (invalidEngines.length > 0) {
-        throw new MCPSearXNGError(
-          `🔍 Invalid SearXNG engine name(s): ${invalidEngines.join(", ")}. ` +
-          "Use the searxng_instance_info tool to discover available engines.",
-        );
-      }
-    }
-  }
 
   const url = new URL('search', parsedUrl);
 
@@ -200,25 +52,17 @@ export async function performWebSearch(
 
   if (
     time_range !== undefined &&
-    ["day", "week", "month", "year"].includes(time_range)
+    ["day", "month", "year"].includes(time_range)
   ) {
     url.searchParams.set("time_range", time_range);
   }
 
-  if (effectiveLanguage && effectiveLanguage !== "all") {
-    url.searchParams.set("language", effectiveLanguage);
+  if (language && language !== "all") {
+    url.searchParams.set("language", language);
   }
 
-  if (effectiveSafesearch !== undefined && [0, 1, 2].includes(effectiveSafesearch)) {
-    url.searchParams.set("safesearch", effectiveSafesearch.toString());
-  }
-
-  if (categories) {
-    url.searchParams.set("categories", categories);
-  }
-
-  if (effectiveEngines) {
-    url.searchParams.set("engines", effectiveEngines);
+  if (safesearch !== undefined && [0, 1, 2].includes(safesearch)) {
+    url.searchParams.set("safesearch", safesearch.toString());
   }
 
   // Prepare request options with headers
@@ -254,20 +98,12 @@ export async function performWebSearch(
     };
   }
 
-  // Fetch with AbortController timeout and enhanced error handling
-  const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARXNG_TIMEOUT_MS ?? "10000", 10);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-
+  // Fetch with enhanced error handling
   let response: Response;
   try {
     logMessage(mcpServer, "info", `Making request to: ${url.toString()}`);
-    response = await fetch(url.toString(), {
-      ...requestOptions,
-      signal: controller.signal,
-    });
+    response = await fetch(url.toString(), requestOptions);
   } catch (error: any) {
-    clearTimeout(timeoutId);
     logMessage(mcpServer, "error", `Network error during search request: ${error.message}`, { query, url: url.toString() });
     const context: ErrorContext = {
       url: url.toString(),
@@ -277,7 +113,6 @@ export async function performWebSearch(
     };
     throw createNetworkError(error, context);
   }
-  clearTimeout(timeoutId);
 
   if (!response.ok) {
     let responseBody: string;
@@ -316,45 +151,26 @@ export async function performWebSearch(
   }
 
   const results = data.results
-    .filter((result) => min_score === undefined || (result.score || 0) >= min_score);
-  const slicedResults = effectiveMax !== undefined
-    ? results.slice(0, effectiveMax)
-    : results;
+    .map((result) => ({
+      title: result.title || "",
+      content: result.content || "",
+      url: result.url || "",
+      score: result.score || 0,
+    }))
+    .filter((r) => min_score === undefined || r.score >= min_score);
 
-  if (response_format === "json") {
-    return JSON.stringify({
-      ...data,
-      results: slicedResults,
-      ...(engineValidationWarning ? { warnings: [engineValidationWarning] } : {}),
-    }, null, 2);
-  }
-
-  const metadata = formatSearchMetadata(data);
-  const leadingSections = [
-    engineValidationWarning ? ENGINE_VALIDATION_NOTE : null,
-    metadata || null,
-  ].filter(Boolean).join("\n\n");
-
-  if (slicedResults.length === 0) {
-    const appliedFilters = [
-      min_score === undefined ? null : `min_score=${min_score}`,
-      effectiveMax === undefined ? null : `num_results=${effectiveMax}`,
-    ].filter(Boolean).join(" ");
-    const filterNote = appliedFilters ? ` after applying ${appliedFilters}` : "";
-    logMessage(mcpServer, "info", `No results found for query: "${query}"${filterNote}`);
-    const noResultsMessage = createNoResultsMessage(query);
-    return leadingSections ? `${leadingSections}\n\n---\n\n${noResultsMessage}` : noResultsMessage;
+  if (results.length === 0) {
+    const reason = min_score !== undefined
+      ? `No results found for query: "${query}" (all results filtered by min_score: ${min_score})`
+      : `No results found for query: "${query}"`;
+    logMessage(mcpServer, "info", reason);
+    return createNoResultsMessage(query);
   }
 
   const duration = Date.now() - startTime;
-  logMessage(mcpServer, "info", `Search completed: "${query}" (${searchParams}) - ${slicedResults.length} results in ${duration}ms`);
+  logMessage(mcpServer, "info", `Search completed: "${query}" (${searchParams}) - ${results.length} results in ${duration}ms`);
 
-  const formattedResults = slicedResults
-    .map((r) => {
-      const score = r.score || 0;
-      return `Title: ${r.title || ""}\nDescription: ${truncateResultContent(r.content || "", maxResultChars)}\nURL: ${r.url || ""}\nRelevance Score: ${score.toFixed(3)}`;
-    })
+  return results
+    .map((r) => `Title: ${r.title}\nDescription: ${r.content}\nURL: ${r.url}\nRelevance Score: ${r.score.toFixed(3)}`)
     .join("\n\n");
-
-  return leadingSections ? `${leadingSections}\n\n---\n\n${formattedResults}` : formattedResults;
 }
