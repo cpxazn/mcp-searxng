@@ -14,7 +14,7 @@ concurrency:
 
 env:
   UPSTREAM_REPO: https://github.com/ihor-sokoliuk/mcp-searxng.git
-  UPSTREAM_BRANCH: main
+  UPSTREAM_BRANCH: master
   TARGET_BRANCH: main
 
 jobs:
@@ -68,30 +68,11 @@ jobs:
       - name: Rebase fork branch onto upstream
         if: steps.detect.outputs.has_changes == 'true'
         shell: bash
-        env:
-          GIT_EDITOR: true
         run: |
           set -euo pipefail
 
           git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
-
-          # Attempt rebase; if conflicts arise, auto-resolve by keeping upstream (theirs)
-          if ! git rebase "upstream/${UPSTREAM_BRANCH}"; then
-            echo "::warning::Rebase conflicts detected — resolving by accepting upstream changes"
-
-            # Stage all resolved files (remove conflict markers, keep theirs)
-            git checkout --theirs .
-            git add .
-
-            # Continue rebase through remaining commits
-            while [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; do
-              if ! GIT_EDITOR=true git rebase --continue 2>&1; then
-                git checkout --theirs . 2>/dev/null || true
-                git add . 2>/dev/null || true
-              fi
-            done
-          fi
-
+          git rebase "upstream/${UPSTREAM_BRANCH}"
           git push origin "${TARGET_BRANCH}" --force-with-lease
 
       - name: Create sync tag
