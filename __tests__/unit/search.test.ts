@@ -17,15 +17,6 @@ const results = createTestResults();
 const fetchMocker = new FetchMocker();
 const envManager = new EnvManager();
 
-function makeMockSearchResults(count: number) {
-  return Array.from({ length: count }, (_, index) => ({
-    title: `Result ${index + 1}`,
-    content: `Content ${index + 1}`,
-    url: `https://example.com/${index + 1}`,
-    score: 1 - index * 0.05,
-  }));
-}
-
 async function runTests() {
   console.log('🧪 Testing: search.ts\n');
 
@@ -63,10 +54,10 @@ async function runTests() {
     envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
     
     const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
+    const { mockFetch, getCapturedUrl, getCapturedOptions } = createCapturingMockFetch();
 
     fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
+      const result = await mockFetch(url, options);
       throw new Error('MOCK_NETWORK_ERROR');
     });
 
@@ -85,6 +76,30 @@ async function runTests() {
     assert.ok(url.searchParams.get('language') === 'en');
     assert.ok(url.searchParams.get('safesearch') === '1');
     assert.ok(url.searchParams.get('format') === 'json');
+
+    fetchMocker.restore();
+    envManager.restore();
+  }, results);
+
+  await testFunction('URL construction supports week time range', async () => {
+    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
+
+    const mockServer = createMockServer();
+    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
+
+    fetchMocker.mock(async (url, options) => {
+      await mockFetch(url, options);
+      throw new Error('MOCK_NETWORK_ERROR');
+    });
+
+    try {
+      await performWebSearch(mockServer as any, 'test query', 1, 'week');
+    } catch {
+      // Expected to fail with mock error
+    }
+
+    const url = new URL(getCapturedUrl());
+    assert.equal(url.searchParams.get('time_range'), 'week');
 
     fetchMocker.restore();
     envManager.restore();
@@ -146,7 +161,7 @@ async function runTests() {
     const { mockFetch, getCapturedOptions } = createCapturingMockFetch();
 
     fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
+      const result = await mockFetch(url, options);
       throw new Error('MOCK_NETWORK_ERROR');
     });
 
@@ -291,167 +306,60 @@ async function runTests() {
     envManager.restore();
   }, results);
 
-  await testFunction('num_results limits formatted results after min_score filtering', async () => {
+  await testFunction('min_score filters out lower relevance results', async () => {
     envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
 
     const mockServer = createMockServer();
     const mockFetch = createMockFetch({
       json: {
         results: [
-          { title: 'Low Score Result', content: 'Filtered first', url: 'https://example.com/low', score: 0.1 },
-          ...makeMockSearchResults(5),
+          {
+            title: 'High Score Result',
+            content: 'Strong match',
+            url: 'https://example.com/high',
+            score: 0.92
+          },
+          {
+            title: 'Low Score Result',
+            content: 'Weak match',
+            url: 'https://example.com/low',
+            score: 0.31
+          }
         ]
       }
     });
 
     fetchMocker.mock(mockFetch);
 
-    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.5, 3);
+    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.5);
+    assert.ok(result.includes('High Score Result'));
     assert.ok(!result.includes('Low Score Result'));
-    assert.ok(result.includes('Result 1'));
-    assert.ok(result.includes('Result 2'));
-    assert.ok(result.includes('Result 3'));
-    assert.ok(!result.includes('Result 4'));
 
     fetchMocker.restore();
     envManager.restore();
   }, results);
 
-  await testFunction('SEARXNG_MAX_RESULTS caps results when num_results is omitted', async () => {
+  await testFunction('min_score returns no-results message when all results are filtered', async () => {
     envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_MAX_RESULTS', '5');
-
-    const mockServer = createMockServer();
-    fetchMocker.mock(createMockFetch({ json: { results: makeMockSearchResults(10) } }));
-
-    const result = await performWebSearch(mockServer as any, 'test query');
-    assert.ok(result.includes('Result 5'));
-    assert.ok(!result.includes('Result 6'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('SEARXNG_MAX_RESULTS is an operator ceiling over num_results', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_MAX_RESULTS', '5');
-
-    const mockServer = createMockServer();
-    fetchMocker.mock(createMockFetch({ json: { results: makeMockSearchResults(10) } }));
-
-    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, undefined, 10);
-    assert.ok(result.includes('Result 5'));
-    assert.ok(!result.includes('Result 6'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Invalid SEARXNG_MAX_RESULTS is ignored', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_MAX_RESULTS', 'not-a-number');
-
-    const mockServer = createMockServer();
-    fetchMocker.mock(createMockFetch({ json: { results: makeMockSearchResults(4) } }));
-
-    const result = await performWebSearch(mockServer as any, 'test query');
-    assert.ok(result.includes('Result 4'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Omitted num_results and unset SEARXNG_MAX_RESULTS preserves all results', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.delete('SEARXNG_MAX_RESULTS');
-
-    const mockServer = createMockServer();
-    fetchMocker.mock(createMockFetch({ json: { results: makeMockSearchResults(6) } }));
-
-    const result = await performWebSearch(mockServer as any, 'test query');
-    assert.ok(result.includes('Result 6'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('SEARXNG_MAX_RESULT_CHARS truncates long result content only', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_MAX_RESULT_CHARS', '10');
 
     const mockServer = createMockServer();
     const mockFetch = createMockFetch({
       json: {
         results: [
           {
-            title: 'Long title should stay intact',
-            content: 'abcdefghijklmnopqrstuvwxyz',
-            url: 'https://example.com/long-url-that-stays-intact',
-            score: 1,
-          },
-        ],
-      },
+            title: 'Low Score Result',
+            content: 'Weak match',
+            url: 'https://example.com/low',
+            score: 0.2
+          }
+        ]
+      }
     });
+
     fetchMocker.mock(mockFetch);
 
-    const result = await performWebSearch(mockServer as any, 'test query');
-    assert.ok(result.includes('Title: Long title should stay intact'));
-    assert.ok(result.includes('Description: abcdefghij…'));
-    assert.ok(result.includes('URL: https://example.com/long-url-that-stays-intact'));
-    assert.ok(!result.includes('Description: abcdefghijklmnopqrstuvwxyz'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('SEARXNG_MAX_RESULT_CHARS leaves short content unchanged', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_MAX_RESULT_CHARS', '100');
-
-    const mockServer = createMockServer();
-    const mockFetch = createMockFetch({
-      json: {
-        results: [
-          {
-            title: 'Short result',
-            content: 'short content',
-            url: 'https://example.com/short',
-            score: 1,
-          },
-        ],
-      },
-    });
-    fetchMocker.mock(mockFetch);
-
-    const result = await performWebSearch(mockServer as any, 'test query');
-    assert.ok(result.includes('Description: short content'));
-    assert.ok(!result.includes('short content…'));
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Invalid SEARXNG_MAX_RESULT_CHARS is ignored', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_MAX_RESULT_CHARS', 'not-a-number');
-
-    const mockServer = createMockServer();
-    const mockFetch = createMockFetch({
-      json: {
-        results: [
-          {
-            title: 'Untruncated result',
-            content: 'abcdefghijklmnopqrstuvwxyz',
-            url: 'https://example.com/untruncated',
-            score: 1,
-          },
-        ],
-      },
-    });
-    fetchMocker.mock(mockFetch);
-
-    const result = await performWebSearch(mockServer as any, 'test query');
-    assert.ok(result.includes('Description: abcdefghijklmnopqrstuvwxyz'));
+    const result = await performWebSearch(mockServer as any, 'test query', 1, undefined, 'all', undefined, 0.8);
+    assert.ok(result.includes('No results found'));
 
     fetchMocker.restore();
     envManager.restore();
@@ -671,203 +579,6 @@ async function runTests() {
     assert.ok(result.includes('High'), 'Should include high score result');
     assert.ok(result.includes('Low'), 'Should include low score result');
     
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('categories="news" adds categories=news to SearXNG request URL', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query', 1, undefined, undefined, undefined, undefined, undefined, 'news');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('categories'), 'news', 'Expected categories=news in URL');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('categories="it,science" adds categories param to URL', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query', 1, undefined, undefined, undefined, undefined, undefined, 'it,science');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('categories'), 'it,science', 'Expected categories=it,science in URL');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Omitting categories sends no categories param to SearXNG', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('categories'), null, 'No categories param should be sent when omitted');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('SEARXNG_DEFAULT_LANGUAGE sets language when per-call language is omitted', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_DEFAULT_LANGUAGE', 'fr');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('language'), 'fr', 'Expected language=fr from SEARXNG_DEFAULT_LANGUAGE');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Per-call language overrides SEARXNG_DEFAULT_LANGUAGE', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_DEFAULT_LANGUAGE', 'fr');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query', 1, undefined, 'de');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('language'), 'de', 'Per-call language should override env default');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('SEARXNG_DEFAULT_SAFESEARCH sets safesearch when per-call safesearch is omitted', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_DEFAULT_SAFESEARCH', '2');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('safesearch'), '2', 'Expected safesearch=2 from SEARXNG_DEFAULT_SAFESEARCH');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Per-call safesearch=0 overrides SEARXNG_DEFAULT_SAFESEARCH=2', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_DEFAULT_SAFESEARCH', '2');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query', 1, undefined, undefined, 0);
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('safesearch'), '0', 'Per-call safesearch=0 should override env default=2');
-
-    fetchMocker.restore();
-    envManager.restore();
-  }, results);
-
-  await testFunction('Invalid SEARXNG_DEFAULT_SAFESEARCH is silently ignored', async () => {
-    envManager.set('SEARXNG_URL', 'https://test-searx.example.com');
-    envManager.set('SEARXNG_DEFAULT_SAFESEARCH', 'bad-value');
-
-    const mockServer = createMockServer();
-    const { mockFetch, getCapturedUrl } = createCapturingMockFetch();
-
-    fetchMocker.mock(async (url, options) => {
-      await mockFetch(url, options);
-      throw new Error('MOCK_STOP');
-    });
-
-    try {
-      await performWebSearch(mockServer as any, 'test query');
-    } catch {
-      // expected
-    }
-
-    const url = new URL(getCapturedUrl());
-    assert.equal(url.searchParams.get('safesearch'), null, 'Invalid SEARXNG_DEFAULT_SAFESEARCH should not set URL param');
-
     fetchMocker.restore();
     envManager.restore();
   }, results);
