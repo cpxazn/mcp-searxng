@@ -7,6 +7,7 @@
  */
 
 import { strict as assert } from 'node:assert';
+import { fileURLToPath } from 'node:url';
 import { WEB_SEARCH_TOOL, isSearXNGWebSearchArgs } from '../../src/types.js';
 import { isWebUrlReadArgs } from '../../src/index.js';
 import { testFunction, createTestResults, printTestSummary } from '../helpers/test-utils.js';
@@ -119,9 +120,7 @@ async function runTests() {
 }
 
 // Run if executed directly
-import { fileURLToPath } from 'node:url';
-const isMainModule = fileURLToPath(import.meta.url) === process.argv[1];
-if (isMainModule) {
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
   runTests().then(results => {
     process.exit(results.failed > 0 ? 1 : 0);
   }).catch(console.error);
