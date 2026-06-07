@@ -52,7 +52,7 @@ export async function performWebSearch(
 
   if (
     time_range !== undefined &&
-    ["day", "month", "year"].includes(time_range)
+    ["day", "week", "month", "year"].includes(time_range)
   ) {
     url.searchParams.set("time_range", time_range);
   }
@@ -157,13 +157,11 @@ export async function performWebSearch(
       url: result.url || "",
       score: result.score || 0,
     }))
-    .filter((r) => min_score === undefined || r.score >= min_score);
+    .filter((result) => min_score === undefined || result.score >= min_score);
 
   if (results.length === 0) {
-    const reason = min_score !== undefined
-      ? `No results found for query: "${query}" (all results filtered by min_score: ${min_score})`
-      : `No results found for query: "${query}"`;
-    logMessage(mcpServer, "info", reason);
+    const filterNote = min_score === undefined ? "" : ` after applying min_score=${min_score}`;
+    logMessage(mcpServer, "info", `No results found for query: "${query}"${filterNote}`);
     return createNoResultsMessage(query);
   }
 
