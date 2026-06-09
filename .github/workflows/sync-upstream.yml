@@ -68,11 +68,30 @@ jobs:
       - name: Rebase fork branch onto upstream
         if: steps.detect.outputs.has_changes == 'true'
         shell: bash
+        env:
+          GIT_EDITOR: true
         run: |
           set -euo pipefail
 
           git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
-          git rebase "upstream/${UPSTREAM_BRANCH}"
+
+          # Attempt rebase; if conflicts arise, auto-resolve by keeping upstream (theirs)
+          if ! git rebase "upstream/${UPSTREAM_BRANCH}"; then
+            echo "::warning::Rebase conflicts detected — resolving by accepting upstream changes"
+
+            # Stage all resolved files (remove conflict markers, keep theirs)
+            git checkout --theirs .
+            git add .
+
+            # Continue rebase through remaining commits
+            while [ "$(git rev-parse --abbrev-ref REBASE_HEAD 2>/dev/null)" != "" ] || [ -d .git/rebase-apply ]; do
+              if ! git rebase --continue 2>&1; then
+                git checkout --theirs .
+                git add .
+              fi
+            done || true
+          fi
+
           git push origin "${TARGET_BRANCH}" --force-with-lease
 
       - name: Create sync tag
