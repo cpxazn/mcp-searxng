@@ -64,7 +64,6 @@ export function isSearXNGWebSearchArgs(args: unknown): args is {
   ) {
     return false;
   }
-  }
 
   return true;
 }
