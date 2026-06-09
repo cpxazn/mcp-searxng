@@ -1,6 +1,3 @@
-#!/usr/bin/env node
-
-import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -21,8 +18,7 @@ import { createConfigResource, createHelpResource } from "./resources.js";
 import { createHttpServer, resolveBindHost } from "./http-server.js";
 
 // Use a static version string that will be updated by the version script
-const packageVersion = "1.1.1";
-const isMainModule = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
+const packageVersion = "1.2.1";
 
 // Export the version for use in other modules
 export { packageVersion };
@@ -238,7 +234,7 @@ export function createMcpServer(): McpServer {
 }
 
 // Main function
-async function main() {
+export async function main() {
   // Check for HTTP transport mode
   const httpPort = process.env.MCP_HTTP_PORT;
   if (httpPort) {
@@ -296,21 +292,4 @@ async function main() {
   }
 }
 
-if (isMainModule) {
-  // Handle uncaught errors for the CLI entrypoint.
-  process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-    process.exit(1);
-  });
 
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    process.exit(1);
-  });
-
-
-  main().catch((error) => {
-    console.error("Failed to start server:", error);
-    process.exit(1);
-  });
-}
