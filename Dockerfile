@@ -39,4 +39,4 @@ COPY --from=builder /app/package-lock.json /app/package-lock.json
 
 RUN npm ci --ignore-scripts --omit=dev && npm uninstall -g npm
 
-ENTRYPOINT ["node", "dist/index.js"]
+ENTRYPOINT ["node", "dist/cli.js"]
