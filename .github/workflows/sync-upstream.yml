@@ -84,12 +84,12 @@ jobs:
             git add .
 
             # Continue rebase through remaining commits
-            while [ "$(git rev-parse --abbrev-ref REBASE_HEAD 2>/dev/null)" != "" ] || [ -d .git/rebase-apply ]; do
-              if ! git rebase --continue 2>&1; then
-                git checkout --theirs .
-                git add .
+            while [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; do
+              if ! GIT_EDITOR=true git rebase --continue 2>&1; then
+                git checkout --theirs . 2>/dev/null || true
+                git add . 2>/dev/null || true
               fi
-            done || true
+            done
           fi
 
           git push origin "${TARGET_BRANCH}" --force-with-lease
