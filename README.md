@@ -10,7 +10,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/isokoliuk/mcp-searxng?style=flat-square&logo=docker)](https://hub.docker.com/r/isokoliuk/mcp-searxng)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ihor-sokoliuk/mcp-searxng/badge)](https://scorecard.dev/viewer/?uri=github.com/ihor-sokoliuk/mcp-searxng)
-[![OpenSSF Baseline](https://www.bestpractices.dev/projects/13143/baseline)](https://www.bestpractices.dev/projects/13143)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13143/badge)](https://www.bestpractices.dev/projects/13143)
 [![mcp-searxng MCP server](https://glama.ai/mcp/servers/ihor-sokoliuk/mcp-searxng/badges/score.svg)](https://glama.ai/mcp/servers/ihor-sokoliuk/mcp-searxng)
 
 An [MCP server](https://modelcontextprotocol.io/introduction) that integrates the [SearXNG](https://docs.searxng.org) API, giving AI assistants web search capabilities.
@@ -40,6 +40,10 @@ Replace `YOUR_SEARXNG_INSTANCE_URL` with the URL of your SearXNG instance (e.g. 
 ## Features
 
 - **Web Search**: General queries, news, articles, with pagination.
+- **Structured Search Output**: Choose formatted text or raw SearXNG-shaped JSON with `response_format`.
+- **Direct Answers & Metadata**: Text results surface SearXNG answers, corrections, suggestions, and infoboxes before result lists.
+- **Search Suggestions**: Query autocomplete via SearXNG's `/autocompleter` endpoint.
+- **Instance Capability Discovery**: Inspect configured categories, engines, defaults, locales, and plugins from `/config`.
 - **URL Content Reading**: Advanced content extraction with pagination, section filtering, and heading extraction.
 - **Intelligent Caching**: URL content is cached with TTL (Time-To-Live) to improve performance and reduce redundant requests.
 - **Pagination**: Control which page of results to retrieve.
@@ -86,6 +90,24 @@ AI Assistant (e.g. Claude)
     - `language` (string, optional): Language code for results (e.g., "en", "fr", "de") or "all" (default: "all")
     - `safesearch` (number, optional): Safe search filter level (0: None, 1: Moderate, 2: Strict) (default: instance setting)
     - `min_score` (number, optional): Minimum relevance score from 0.0 to 1.0. Results below this score are filtered out.
+    - `num_results` (number, optional): Maximum number of results to return, from 1 to 20. `SEARXNG_MAX_RESULTS` applies as an operator ceiling.
+    - `categories` (string, optional): Comma-separated SearXNG categories (e.g. `"news"`, `"it,science"`). Supported values: `general`, `news`, `images`, `videos`, `it`, `science`, `files`, `social media`. Default: SearXNG instance default (usually `general`).
+    - `engines` (string, optional): Comma-separated SearXNG engine names (e.g. `"google,bing,ddg"`). Names are matched exactly when live `/config` validation is available.
+    - `response_format` (string, optional): Response format, either `"text"` for formatted agent-readable output or `"json"` for raw SearXNG JSON with filtered/sliced `results`. (default: `"text"`)
+
+- **searxng_search_suggestions**
+  - Get autocomplete suggestions for refining search queries
+  - Inputs:
+    - `query` (string): Partial or complete query to autocomplete.
+    - `language` (string, optional): Language code for suggestions (e.g., "en", "fr", "de") or "all" (default: "all")
+
+- **searxng_instance_info**
+  - Discover categories, engines, defaults, locales, and plugins exposed by the configured SearXNG instance
+  - Inputs:
+    - `includeEngines` (boolean, optional): Include enabled engine names in the response. (default: false)
+    - `includeDisabled` (boolean, optional): Include disabled engine names when `includeEngines` is true. (default: false)
+    - `category` (string, optional): Filter categories and engines to a single category name.
+    - `refresh` (boolean, optional): Bypass the process cache and fetch fresh `/config` data. (default: false)
 
 - **web_url_read**
   - Read and convert the content from a URL to markdown with advanced content extraction options
@@ -129,6 +151,8 @@ npm install -g mcp-searxng
 ```bash
 docker pull isokoliuk/mcp-searxng:latest
 ```
+
+Image signatures can be verified with Cosign — see [SECURITY.md](SECURITY.md) for instructions.
 
 ```json
 {

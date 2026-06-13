@@ -9,6 +9,8 @@
  */
 
 import { strict as assert } from 'node:assert';
+import http from 'node:http';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -44,22 +46,152 @@ const SEARXNG_RESPONSE = JSON.stringify({
   ],
 });
 
+const MANY_SEARXNG_RESULTS_RESPONSE = JSON.stringify({
+  results: Array.from({ length: 5 }, (_, index) => ({
+    title: `Result ${index + 1}`,
+    url: `https://example.com/${index + 1}`,
+    content: `Snippet ${index + 1}`,
+    score: 1 - index * 0.1,
+  })),
+});
+
 /** Minimal HTML for URL reader */
 const HTML_RESPONSE = '<html><body><h1>Hello</h1><p>World</p></body></html>';
+const LONG_HTML_RESPONSE = '<html><body><p>abcdefghijklmnopqrstuvwxyz</p></body></html>';
+
+async function withLocalHtmlServer(body: string, test: (url: string) => Promise<void>) {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(body);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, '127.0.0.1', resolve);
+    server.once('error', reject);
+  });
+
+  const address = server.address() as net.AddressInfo;
+  try {
+    await test(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.closeAllConnections();
+      server.close(() => resolve());
+    });
+  }
+}
+
+async function withPrivateUrlReadsAllowed(test: () => Promise<void>) {
+  const originalValue = process.env.MCP_HTTP_ALLOW_PRIVATE_URLS;
+  process.env.MCP_HTTP_ALLOW_PRIVATE_URLS = 'true';
+  try {
+    await test();
+  } finally {
+    if (originalValue === undefined) {
+      delete process.env.MCP_HTTP_ALLOW_PRIVATE_URLS;
+    } else {
+      process.env.MCP_HTTP_ALLOW_PRIVATE_URLS = originalValue;
+    }
+  }
+}
 
 async function runTests() {
   console.log('🧪 Integration Testing: MCP handler dispatch (InMemoryTransport)\n');
 
   // ── tools/list ──────────────────────────────────────────────────────────────
 
-  await testFunction('tools/list returns searxng_web_search and web_url_read', async () => {
+  await testFunction('tools/list returns all search, discovery, and URL tools', async () => {
     const { client } = await connect();
     const result = await client.listTools();
 
-    assert.equal(result.tools.length, 2);
+    assert.equal(result.tools.length, 4);
     assert.ok(result.tools.find((t) => t.name === 'searxng_web_search'), 'missing searxng_web_search');
+    assert.ok(result.tools.find((t) => t.name === 'searxng_search_suggestions'), 'missing searxng_search_suggestions');
+    assert.ok(result.tools.find((t) => t.name === 'searxng_instance_info'), 'missing searxng_instance_info');
     assert.ok(result.tools.find((t) => t.name === 'web_url_read'), 'missing web_url_read');
 
+    await client.close();
+  }, results);
+
+  // ── tools/list: SEARXNG_LITE_TOOLS ──────────────────────────────────────────
+
+  await testFunction('tools/list with SEARXNG_LITE_TOOLS=true returns minimal schemas', async () => {
+    process.env.SEARXNG_LITE_TOOLS = 'true';
+    const { client } = await connect();
+    const result = await client.listTools();
+
+    assert.equal(result.tools.length, 4);
+    const searchTool = result.tools.find((t) => t.name === 'searxng_web_search');
+    const suggestionsTool = result.tools.find((t) => t.name === 'searxng_search_suggestions');
+    const instanceInfoTool = result.tools.find((t) => t.name === 'searxng_instance_info');
+    const readTool = result.tools.find((t) => t.name === 'web_url_read');
+    assert.ok(searchTool, 'searxng_web_search must be registered');
+    assert.ok(suggestionsTool, 'searxng_search_suggestions must be registered');
+    assert.ok(instanceInfoTool, 'searxng_instance_info must be registered');
+    assert.ok(readTool, 'web_url_read must be registered');
+
+    const searchProps = searchTool.inputSchema.properties as Record<string, unknown>;
+    assert.ok(searchProps.query, 'lite search tool must have query');
+    assert.ok(!searchProps.language, 'lite search tool must NOT have language');
+    assert.ok(!searchProps.safesearch, 'lite search tool must NOT have safesearch');
+
+    const readProps = readTool.inputSchema.properties as Record<string, unknown>;
+    assert.ok(readProps.url, 'lite read tool must have url');
+    assert.ok(!readProps.maxLength, 'lite read tool must NOT have maxLength');
+
+    const suggestionProps = suggestionsTool.inputSchema.properties as Record<string, unknown>;
+    assert.ok(suggestionProps.query, 'lite suggestions tool must have query');
+    assert.ok(!suggestionProps.language, 'lite suggestions tool must NOT have language');
+
+    const instanceInfoProps = instanceInfoTool.inputSchema.properties as Record<string, unknown>;
+    assert.equal(Object.keys(instanceInfoProps).length, 0, 'lite instance info tool must have no optional controls');
+
+    delete process.env.SEARXNG_LITE_TOOLS;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/list with SEARXNG_LITE_TOOLS unset returns full schemas', async () => {
+    delete process.env.SEARXNG_LITE_TOOLS;
+    const { client } = await connect();
+    const result = await client.listTools();
+
+    const searchTool = result.tools.find((t) => t.name === 'searxng_web_search');
+    assert.ok(searchTool);
+    const searchProps = searchTool!.inputSchema.properties as Record<string, unknown>;
+    assert.ok(searchProps.language, 'full search tool must have language');
+    assert.ok(searchProps.safesearch, 'full search tool must have safesearch');
+
+    const suggestionsTool = result.tools.find((t) => t.name === 'searxng_search_suggestions');
+    assert.ok(suggestionsTool);
+    const suggestionProps = suggestionsTool!.inputSchema.properties as Record<string, unknown>;
+    assert.ok(suggestionProps.language, 'full suggestions tool must have language');
+
+    const instanceInfoTool = result.tools.find((t) => t.name === 'searxng_instance_info');
+    assert.ok(instanceInfoTool);
+    const instanceInfoProps = instanceInfoTool!.inputSchema.properties as Record<string, unknown>;
+    assert.ok(instanceInfoProps.includeEngines, 'full instance info tool must have includeEngines');
+
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call searxng_web_search with SEARXNG_LITE_TOOLS=true still uses language arg', async () => {
+    process.env.SEARXNG_LITE_TOOLS = 'true';
+    process.env.SEARXNG_URL = 'http://localhost:8080';
+
+    let capturedUrl = '';
+    fetchMocker.mock(async (url, _opts) => {
+      capturedUrl = url as string;
+      return { ok: true, json: async () => ({ results: [{ title: 'R', url: 'https://x.com', content: 'c', score: 1 }] }), text: async () => '' } as any;
+    });
+    const { client } = await connect();
+
+    await client.callTool({ name: 'searxng_web_search', arguments: { query: 'test', language: 'fr' } });
+
+    assert.ok(capturedUrl.includes('language=fr'), `Expected language=fr in URL, got: ${capturedUrl}`);
+
+    fetchMocker.restore();
+    delete process.env.SEARXNG_LITE_TOOLS;
+    delete process.env.SEARXNG_URL;
     await client.close();
   }, results);
 
@@ -87,6 +219,39 @@ async function runTests() {
     await client.close();
   }, results);
 
+  await testFunction('tools/call searxng_web_search returns prepended search metadata', async () => {
+    process.env.SEARXNG_URL = 'http://localhost:8080';
+    fetchMocker.mock(createMockFetch({
+      body: JSON.stringify({
+        answers: ['Paris'],
+        suggestions: ['capital of France'],
+        results: [
+          {
+            title: 'France Result',
+            url: 'https://example.com/france',
+            content: 'France snippet',
+            score: 1.0,
+          },
+        ],
+      }),
+    }));
+    const { client } = await connect();
+
+    const result = await client.callTool({
+      name: 'searxng_web_search',
+      arguments: { query: 'capital france' },
+    });
+
+    const text = (result.content[0] as { type: string; text: string }).text;
+    assert.ok(text.startsWith('Direct answer: Paris'), text);
+    assert.ok(text.includes('Suggestions: capital of France'), text);
+    assert.ok(text.includes('Title: France Result'), text);
+
+    fetchMocker.restore();
+    delete process.env.SEARXNG_URL;
+    await client.close();
+  }, results);
+
   await testFunction('tools/call searxng_web_search with all optional params succeeds', async () => {
     process.env.SEARXNG_URL = 'http://localhost:8080';
     fetchMocker.mock(createMockFetch({ body: SEARXNG_RESPONSE }));
@@ -105,6 +270,118 @@ async function runTests() {
     });
 
     assert.equal(result.content[0].type, 'text');
+
+    fetchMocker.restore();
+    delete process.env.SEARXNG_URL;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call searxng_web_search honors num_results', async () => {
+    process.env.SEARXNG_URL = 'http://localhost:8080';
+    fetchMocker.mock(createMockFetch({ body: MANY_SEARXNG_RESULTS_RESPONSE }));
+    const { client } = await connect();
+
+    const result = await client.callTool({
+      name: 'searxng_web_search',
+      arguments: {
+        query: 'test',
+        num_results: 2,
+      },
+    });
+
+    const text = (result.content[0] as { type: string; text: string }).text;
+    assert.ok(text.includes('Result 1'));
+    assert.ok(text.includes('Result 2'));
+    assert.ok(!text.includes('Result 3'));
+
+    fetchMocker.restore();
+    delete process.env.SEARXNG_URL;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call searxng_web_search supports response_format=json', async () => {
+    process.env.SEARXNG_URL = 'http://localhost:8080';
+    fetchMocker.mock(createMockFetch({
+      body: JSON.stringify({
+        query: 'json test',
+        number_of_results: 1,
+        results: [
+          {
+            title: 'JSON Result',
+            url: 'https://example.com/json',
+            content: 'JSON snippet',
+            score: 1.0,
+            engines: ['google'],
+          },
+        ],
+      }),
+    }));
+    const { client } = await connect();
+
+    const result = await client.callTool({
+      name: 'searxng_web_search',
+      arguments: { query: 'json test', response_format: 'json' },
+    });
+
+    const payload = JSON.parse((result.content[0] as { type: string; text: string }).text);
+    assert.equal(payload.query, 'json test');
+    assert.equal(payload.results[0].title, 'JSON Result');
+    assert.deepEqual(payload.results[0].engines, ['google']);
+
+    fetchMocker.restore();
+    delete process.env.SEARXNG_URL;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call searxng_search_suggestions returns JSON suggestions', async () => {
+    process.env.SEARXNG_URL = 'http://localhost:8080';
+    fetchMocker.mock(createMockFetch({ body: JSON.stringify(['type', ['typescript', 'typescript tutorial']]) }));
+    const { client } = await connect();
+
+    const result = await client.callTool({
+      name: 'searxng_search_suggestions',
+      arguments: { query: 'type', language: 'en' },
+    });
+
+    assert.equal(result.content[0].type, 'text');
+    const payload = JSON.parse((result.content[0] as { type: string; text: string }).text);
+    assert.deepEqual(payload, {
+      query: 'type',
+      suggestions: ['typescript', 'typescript tutorial'],
+    });
+
+    fetchMocker.restore();
+    delete process.env.SEARXNG_URL;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call searxng_instance_info returns JSON instance info', async () => {
+    process.env.SEARXNG_URL = 'http://localhost:8080';
+    fetchMocker.mock(createMockFetch({
+      body: JSON.stringify({
+        categories: { general: {}, news: {} },
+        engines: [
+          { name: 'google', categories: ['general'], disabled: false },
+          { name: 'bing', categories: ['general'], disabled: true },
+        ],
+        search: { safe_search: 1 },
+        default_theme: 'simple',
+        plugins: [],
+      }),
+    }));
+    const { client } = await connect();
+
+    const result = await client.callTool({
+      name: 'searxng_instance_info',
+      arguments: { includeEngines: true, includeDisabled: true },
+    });
+
+    assert.equal(result.content[0].type, 'text');
+    const payload = JSON.parse((result.content[0] as { type: string; text: string }).text);
+    assert.equal(payload.available, true);
+    assert.deepEqual(payload.categories, ['general', 'news']);
+    assert.deepEqual(payload.engines.enabled, ['google']);
+    assert.deepEqual(payload.engines.disabled, ['bing']);
 
     fetchMocker.restore();
     delete process.env.SEARXNG_URL;
@@ -163,6 +440,118 @@ async function runTests() {
     });
 
     assert.equal(result.content[0].type, 'text');
+
+    fetchMocker.restore();
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call web_url_read uses URL_READ_MAX_CHARS when maxLength is omitted', async () => {
+    process.env.URL_READ_MAX_CHARS = '10';
+    const { client } = await connect();
+
+    await withPrivateUrlReadsAllowed(async () => {
+      await withLocalHtmlServer(LONG_HTML_RESPONSE, async (url) => {
+        const result = await client.callTool({
+          name: 'web_url_read',
+          arguments: { url },
+        });
+
+        const text = (result.content[0] as { type: string; text: string }).text;
+        assert.ok(text.length <= 10);
+        assert.ok(text.startsWith('abcde'));
+      });
+    });
+
+    delete process.env.URL_READ_MAX_CHARS;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call web_url_read maxLength overrides URL_READ_MAX_CHARS', async () => {
+    process.env.URL_READ_MAX_CHARS = '10';
+    const { client } = await connect();
+
+    await withPrivateUrlReadsAllowed(async () => {
+      await withLocalHtmlServer(LONG_HTML_RESPONSE, async (url) => {
+        const result = await client.callTool({
+          name: 'web_url_read',
+          arguments: { url, maxLength: 5 },
+        });
+
+        const text = (result.content[0] as { type: string; text: string }).text;
+        assert.ok(text.length <= 5);
+        assert.ok(text.startsWith('abcde'));
+      });
+    });
+
+    delete process.env.URL_READ_MAX_CHARS;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call web_url_read ignores invalid URL_READ_MAX_CHARS', async () => {
+    process.env.URL_READ_MAX_CHARS = '0';
+    const { client } = await connect();
+
+    await withPrivateUrlReadsAllowed(async () => {
+      await withLocalHtmlServer(LONG_HTML_RESPONSE, async (url) => {
+        const result = await client.callTool({
+          name: 'web_url_read',
+          arguments: { url },
+        });
+
+        const text = (result.content[0] as { type: string; text: string }).text;
+        assert.ok(text.includes('abcdefghijklmnopqrstuvwxyz'));
+      });
+    });
+
+    delete process.env.URL_READ_MAX_CHARS;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call web_url_read FETCH_TIMEOUT_MS=100 times out against hanging server', async () => {
+    process.env.FETCH_TIMEOUT_MS = '100';
+    process.env.MCP_HTTP_ALLOW_PRIVATE_URLS = 'true';
+    const { client } = await connect();
+
+    const hangingServer = http.createServer((_req, _res) => { /* never responds */ });
+    await new Promise<void>((resolve, reject) => {
+      hangingServer.listen(0, '127.0.0.1', resolve);
+      hangingServer.once('error', reject);
+    });
+    const addr = hangingServer.address() as net.AddressInfo;
+    const hangUrl = `http://127.0.0.1:${addr.port}`;
+
+    const start = Date.now();
+    try {
+      await client.callTool({ name: 'web_url_read', arguments: { url: hangUrl } });
+      assert.fail('Expected timeout error to be thrown');
+    } catch (error: any) {
+      const elapsed = Date.now() - start;
+      // Must abort well before the default 10 s (100 ms timeout + margin)
+      assert.ok(elapsed < 3000, `Expected timeout within 3 s, took ${elapsed} ms`);
+      assert.ok(
+        error.message.toLowerCase().includes('network') ||
+        error.message.toLowerCase().includes('abort') ||
+        error.message.toLowerCase().includes('timeout') ||
+        error.message.toLowerCase().includes('error'),
+        `Expected network/timeout error, got: ${error.message}`
+      );
+    }
+
+    await new Promise<void>((resolve) => { hangingServer.closeAllConnections(); hangingServer.close(() => resolve()); });
+    delete process.env.FETCH_TIMEOUT_MS;
+    delete process.env.MCP_HTTP_ALLOW_PRIVATE_URLS;
+    await client.close();
+  }, results);
+
+  await testFunction('tools/call web_url_read FETCH_TIMEOUT_MS default 10000 used when env unset', async () => {
+    delete process.env.FETCH_TIMEOUT_MS;
+    fetchMocker.mock(createMockFetch({ body: HTML_RESPONSE }));
+    const { client } = await connect();
+
+    // Normal request succeeds — confirms the default timeout path doesn't break anything
+    const result = await client.callTool({ name: 'web_url_read', arguments: { url: 'https://example.com' } });
+    assert.equal(result.content[0].type, 'text');
+    assert.ok((result.content[0] as { type: string; text: string }).text.length > 0);
 
     fetchMocker.restore();
     await client.close();

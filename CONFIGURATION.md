@@ -20,6 +20,36 @@ All environment variables for `mcp-searxng`, organized by concern. All variables
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `SEARXNG_TIMEOUT_MS` | No | `10000` | Maximum time in milliseconds to wait for a SearXNG search response. The request is aborted and a network error is returned if the server does not respond within this window. |
+| `FETCH_TIMEOUT_MS` | No | `10000` | Maximum time in milliseconds to wait for a `web_url_read` fetch. The request is aborted and an error is returned if the server does not respond within this window. |
+
+## Tool Schema
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SEARXNG_LITE_TOOLS` | No | `false` | Set to `true` to register minimal tool schemas with only `query` / `url` parameters. Reduces per-call token overhead for local models with small context windows. Extra parameters (e.g. `language`, `maxLength`) passed by the caller are still accepted and forwarded. |
+
+## Search Defaults
+
+Operator-level defaults applied when the caller omits the corresponding per-call parameter.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SEARXNG_DEFAULT_LANGUAGE` | No | `all` | Default language for all searches when `language` is not passed per call (e.g. `en`, `fr`, `de`). |
+| `SEARXNG_DEFAULT_SAFESEARCH` | No | — | Default safe-search level: `0` (off), `1` (moderate), `2` (strict). Invalid values are ignored with a warning. When unset, the SearXNG instance default applies. |
+
+## Search Result Controls
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SEARXNG_MAX_RESULTS` | No | — | Operator-level maximum number of search results to return per call (1-20). Invalid values are ignored. Recommended: `10` for smaller context windows. |
+| `SEARXNG_MAX_RESULT_CHARS` | No | — | Maximum characters to include in each search result snippet. Longer snippets are truncated and marked with `…`. Invalid values are ignored. Recommended: `500` for smaller context windows. |
+
+## URL Reader Controls
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `URL_READ_MAX_CHARS` | No | — | Default maximum characters returned by `web_url_read` when the caller omits `maxLength`. Explicit `maxLength` always wins. Invalid values are ignored. |
+| `URL_READ_MAX_CONTENT_LENGTH_BYTES` | No | `5242880` | Maximum `Content-Length` allowed by the `web_url_read` HEAD preflight before downloading a page. Invalid values fall back to the default. HEAD failures are non-fatal and the GET proceeds. |
 
 ## User-Agent
 
@@ -101,6 +131,14 @@ Complete MCP client configuration with every variable. Mix and match as needed �
       "env": {
         "SEARXNG_URL": "YOUR_SEARXNG_INSTANCE_URL",
         "SEARXNG_TIMEOUT_MS": "10000",
+        "FETCH_TIMEOUT_MS": "10000",
+        "SEARXNG_LITE_TOOLS": "false",
+        "SEARXNG_DEFAULT_LANGUAGE": "en",
+        "SEARXNG_DEFAULT_SAFESEARCH": "0",
+        "SEARXNG_MAX_RESULTS": "10",
+        "SEARXNG_MAX_RESULT_CHARS": "500",
+        "URL_READ_MAX_CHARS": "2000",
+        "URL_READ_MAX_CONTENT_LENGTH_BYTES": "5242880",
         "AUTH_USERNAME": "your_username",
         "AUTH_PASSWORD": "your_password",
         "USER_AGENT": "MyBot/1.0",

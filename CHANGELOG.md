@@ -3,6 +3,70 @@
 All notable changes to mcp-searxng are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-06-12
+
+### Added
+
+- **`searxng_suggestions` tool:** Returns search autocomplete suggestions from the SearXNG instance. Useful for exploring related queries before committing to a full search.
+
+- **`searxng_instance_info` tool:** Discovers the capabilities of the connected SearXNG instance — enabled engines, supported categories, available languages, and safe-search settings.
+
+- **JSON response format:** `searxng_web_search` accepts a new `response_format` parameter (`"text"` or `"json"`). The `"json"` format returns raw structured data instead of the formatted Markdown text, enabling programmatic result processing.
+
+- **Search metadata in text output:** `searxng_web_search` text responses now include SearXNG answers, spelling corrections, infoboxes, and autocomplete suggestions when the instance returns them — giving richer context alongside the ranked web results.
+
+### Fixed
+
+- Metadata (answers, corrections, infoboxes) is now preserved in text output even when `min_score` filters out all web results. Previously the metadata was silently dropped.
+
+- Unresponsive engines are no longer listed in text output.
+
+- `searxng_suggestions` and `searxng_instance_info` requests now route through the configured search proxy and default TLS dispatcher, matching the behaviour of `searxng_web_search`.
+
+## [1.4.0] - 2026-06-11
+
+### Added
+
+- **Result count control:** `num_results` parameter on `searxng_web_search` (1–20) lets callers request only as many results as they need. `SEARXNG_MAX_RESULTS` env var sets an operator-level hard cap that applies even when `num_results` is omitted — useful for reducing token spend across all callers.
+
+- **Token budget limits:** `SEARXNG_MAX_RESULT_CHARS` env var truncates each search result snippet to a character limit (appending `…`) before returning. `URL_READ_MAX_CHARS` env var sets a default `maxLength` for URL reads when the caller omits it — both controls are recommended for local models with small context windows.
+
+- **HEAD preflight for URL reader:** A fast HEAD request is made before every URL fetch to check `Content-Length`. If the server reports a size above `URL_READ_MAX_CONTENT_LENGTH_BYTES` (default 5 MB), the download is blocked and a descriptive message with `readHeadings`/`section` pagination hints is returned instead of downloading an unbounded body.
+
+- **`categories` parameter on `searxng_web_search`:** Routes searches to specific SearXNG categories — `general`, `news`, `images`, `videos`, `it`, `science`, `files`, `social media`. Omitting the parameter uses the SearXNG instance default (`general`).
+
+- **Configurable search defaults:** `SEARXNG_DEFAULT_LANGUAGE` and `SEARXNG_DEFAULT_SAFESEARCH` env vars set operator-level defaults for language and safe-search level. Per-call parameters still take precedence. Invalid `SEARXNG_DEFAULT_SAFESEARCH` values (not `0`, `1`, or `2`) are logged and ignored.
+
+- **Configurable timeouts:** `SEARXNG_TIMEOUT_MS` controls the search request timeout and `FETCH_TIMEOUT_MS` controls the URL reader fetch timeout (both default to `10000` ms).
+
+- **Lite tool schemas (`SEARXNG_LITE_TOOLS=true`):** When set, registers minimal `query`-only and `url`-only tool schemas instead of the full parameter list. Reduces context overhead for local models with small context windows while still forwarding any extra arguments the caller provides.
+
+### Security
+
+- Pinned the npm trusted publishing installer step in the publish workflow to a full commit SHA to guard against tag-swap supply-chain attacks.
+
+## [1.3.4] - 2026-06-11
+
+### Security
+- Docker images are now signed with Cosign (keyless OIDC). Verify a published image with:
+  ```bash
+  cosign verify docker.io/isokoliuk/mcp-searxng:latest \
+    --certificate-identity-regexp 'https://github.com/ihor-sokoliuk/mcp-searxng/.github/workflows/docker-publish.yml@.*' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+- Expanded fuzz test coverage: search parameter handling and URL read arguments are now fuzz-tested on every CI run.
+- Tightened GitHub Actions workflow permissions to least-privilege and switched to reproducible `npm ci` installs in the publish pipeline.
+
+## [1.3.3] - 2026-06-10
+
+### Fixed
+- `test:coverage` script now enforces the coverage threshold mechanically.
+- Gitignored AI process artifacts (plans, drafts) so they can never be committed.
+
+### Security
+- Docker base image (`node:lts-alpine`) is now pinned by digest and bumped automatically via Dependabot.
+- Added a weekly rebuild workflow: when upstream patches the base image, the published Docker image is rebuilt from the latest release tag, re-scanned with Trivy, and republished under the same version tags. Published images now embed the `org.opencontainers.image.base.digest` OCI label for auditability.
+
 ## [1.3.2] - 2026-06-09
 
 ### Fixed
