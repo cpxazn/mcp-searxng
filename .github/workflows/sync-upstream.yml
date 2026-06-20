@@ -75,21 +75,49 @@ jobs:
 
           git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
 
+          # Fork-specific files to preserve even when upstream doesn't have them
+          FORK_WORKFLOWS=(.github/workflows/docker-release.yml)
+
           # Attempt rebase; if conflicts arise, auto-resolve by keeping upstream (theirs)
           if ! git rebase "upstream/${UPSTREAM_BRANCH}"; then
             echo "::warning::Rebase conflicts detected — resolving by accepting upstream changes"
+
+            # Save fork-specific files before conflict resolution
+            declare -A saved_files
+            for f in "${FORK_WORKFLOWS[@]}"; do
+              if [ -f "$f" ]; then
+                saved_files["$f"]="$(git rev-parse HEAD:"$f")"
+                echo "  preserving fork-specific: $f"
+              fi
+            done
 
             # Stage all resolved files (remove conflict markers, keep theirs)
             git checkout --theirs .
             git add .
 
-            # Continue rebase through remaining commits
-            while [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; do
-              if ! GIT_EDITOR=true git rebase --continue 2>&1; then
-                git checkout --theirs . 2>/dev/null || true
-                git add . 2>/dev/null || true
+            # Restore fork-specific files that were deleted by upstream resolution
+            for f in "${FORK_WORKFLOWS[@]}"; do
+              if [ -n "${saved_files[$f]:-}" ] && [ ! -f "$f" ]; then
+                echo "  restoring fork-specific: $f"
+                git checkout "${saved_files[$f]}" -- "$f"
+                git add "$f"
               fi
             done
+
+            # Continue rebase through remaining commits
+            while [ "$(git rev-parse --abbrev-ref REBASE_HEAD 2>/dev/null)" != "" ] || [ -d .git/rebase-apply ]; do
+              if ! git rebase --continue 2>&1; then
+                git checkout --theirs .
+                git add .
+                # Restore fork-specific files on subsequent conflicts too
+                for f in "${FORK_WORKFLOWS[@]}"; do
+                  if [ -n "${saved_files[$f]:-}" ] && [ ! -f "$f" ]; then
+                    git checkout "${saved_files[$f]}" -- "$f"
+                    git add "$f"
+                  fi
+                done
+              fi
+            done || true
           fi
 
           git push origin "${TARGET_BRANCH}" --force-with-lease
